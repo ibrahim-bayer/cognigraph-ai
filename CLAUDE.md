@@ -194,6 +194,20 @@ Agents are activated automatically based on task context. Do not wait for explic
 - Comparing graph-path vs LLM-fallback performance
 - Evaluating whether the graph is actually reducing LLM usage over time
 
+### Architect Agent (`.claude/skills/architect.md`)
+**Activate when:**
+- Any issue labeled `priority:critical` or `priority:high` is being implemented
+- Security-related code is written or modified (safety boundary, risk gating, input validation, API key handling, SQLite queries)
+- Architectural review is explicitly requested
+- Pipeline or lifecycle wiring is changed (`pipeline.py`, `lifecycle.py`)
+- Protocol ABCs or interfaces are changed (contract changes)
+- Cross-component dependencies are introduced or modified
+- Data model or configuration schema changes
+- The graph-first/LLM-fallback boundary is touched (routing, thresholds, escalation)
+
+**Do NOT activate for:**
+- Cosmetic changes, test-only changes, documentation updates
+
 ### Auditor Agent (`.claude/skills/auditor.md`)
 **Activate when:**
 - Graph nodes are being created, modified, or migrated
@@ -206,21 +220,26 @@ Agents are activated automatically based on task context. Do not wait for explic
 
 | Scenario | Agents to activate |
 |---|---|
-| New component implemented | Developer → then Testing + Benchmark in parallel |
-| Technology choice needed | Research → then Developer |
-| Graph traversal logic changed | Developer → then Testing + Auditor in parallel |
-| Node/linking logic changed | Developer → then Testing + Auditor + Benchmark in parallel |
-| Performance regression | Benchmark → then Developer to fix |
+| New component implemented | Developer → Architect review → then Testing + Benchmark in parallel |
+| Technology choice needed | Research → Architect review → then Developer |
+| Graph traversal logic changed | Developer → then Testing + Auditor + Architect in parallel |
+| Node/linking logic changed | Developer → then Testing + Auditor + Architect + Benchmark in parallel |
+| Performance regression | Benchmark → then Developer to fix → Architect review |
 | Wrong answer from graph | Auditor → then Developer to fix → then Testing |
-| New embedding model evaluated | Research + Benchmark in parallel |
-| Pre-release validation | Testing + Benchmark + Auditor in parallel |
+| New embedding model evaluated | Research + Benchmark in parallel → Architect review |
+| Pre-release validation | Testing + Benchmark + Auditor + Architect in parallel |
+| Security-related change | Architect → then Developer → then Testing + Auditor in parallel |
+| Pipeline/lifecycle wiring | Developer → Architect review → then Testing |
+| Protocol/interface change | Architect review → then Developer → then Testing |
+| Critical priority issue | Architect + Developer in parallel → then Testing + Auditor |
 
 ### Activation Priority
-1. **Auditor** — safety first
-2. **Testing** — correctness before optimization
-3. **Benchmark** — measure before declaring done
-4. **Developer** — build what's decided
-5. **Research** — investigate when uncertain
+1. **Architect** — structural and security review first
+2. **Auditor** — safety and data integrity
+3. **Testing** — correctness before optimization
+4. **Benchmark** — measure before declaring done
+5. **Developer** — build what's decided
+6. **Research** — investigate when uncertain
 
 ## Development Phases
 
