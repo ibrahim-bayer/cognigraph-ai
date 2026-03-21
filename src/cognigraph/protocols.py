@@ -1,0 +1,47 @@
+"""Protocol ABCs defining component contracts for CogniGraph."""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from cognigraph.models import HabitNode, ChildLink
+from cognigraph.types import NodeId, EmbeddingVector, LLMResponse
+
+
+@runtime_checkable
+class EmbeddingProvider(Protocol):
+    """Contract for embedding model implementations."""
+
+    def embed(self, text: str) -> EmbeddingVector: ...
+
+    def embed_batch(self, texts: list[str]) -> list[EmbeddingVector]: ...
+
+
+@runtime_checkable
+class LLMProvider(Protocol):
+    """Contract for LLM implementations."""
+
+    def generate(self, prompt: str, context: list[dict] | None = None) -> LLMResponse: ...
+
+
+@runtime_checkable
+class GraphStoreProtocol(Protocol):
+    """Contract for graph store implementations."""
+
+    def get_node(self, node_id: NodeId) -> HabitNode: ...
+
+    def put_node(self, node: HabitNode) -> None: ...
+
+    def remove_node(self, node_id: NodeId) -> None: ...
+
+    def get_children(self, node_id: NodeId) -> list[ChildLink]: ...
+
+    def get_parents(self, node_id: NodeId) -> set[NodeId]: ...
+
+    def add_link(self, parent_id: NodeId, child_link: ChildLink) -> None: ...
+
+    def remove_link(self, parent_id: NodeId, child_id: NodeId) -> None: ...
+
+    def all_nodes(self) -> list[HabitNode]: ...
+
+    def node_count(self) -> int: ...
