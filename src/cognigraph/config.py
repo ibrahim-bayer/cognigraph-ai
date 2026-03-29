@@ -70,6 +70,9 @@ class CogniGraphConfig:
     ambiguity_gap: float = 0.05
     blocklist_patterns: list[str] = field(default_factory=list)
 
+    # --- Normalizer ---
+    max_input_length: int = 10_000
+
     # --- Responder ---
     max_response_length: int = 4096
 
@@ -109,6 +112,7 @@ class CogniGraphConfig:
         self._check_positive("embedding_dim", self.embedding_dim)
         self._check_positive("faiss_search_k", self.faiss_search_k)
         self._check_positive("llm_max_tokens", self.llm_max_tokens)
+        self._check_positive("max_input_length", self.max_input_length)
         self._check_positive("max_response_length", self.max_response_length)
 
         for weight_name in (

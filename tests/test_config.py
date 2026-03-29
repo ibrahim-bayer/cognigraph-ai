@@ -74,6 +74,7 @@ class TestConfigValidation:
             CogniGraphConfig(**{field: bad_value})
 
     @pytest.mark.parametrize("field,bad_value", [
+        ("max_input_length", 0),
         ("max_graph_capacity", 0),
         ("max_graph_capacity", -1),
         ("decay_interval_hours", 0),

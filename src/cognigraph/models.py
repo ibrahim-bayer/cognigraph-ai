@@ -7,6 +7,8 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
+from cognigraph.exceptions import PersistenceError
+
 
 class Stability(str, Enum):
     HIGH = "high"
@@ -50,11 +52,19 @@ class ChildLink:
 
     @classmethod
     def from_dict(cls, data: dict) -> ChildLink:
-        return cls(
-            habit_id=data["habit_id"],
-            condition=data.get("condition"),
-            order=data.get("order", 0),
-        )
+        try:
+            habit_id = data["habit_id"]
+            if not isinstance(habit_id, str) or not habit_id:
+                raise PersistenceError("ChildLink.habit_id must be a non-empty string")
+            return cls(
+                habit_id=habit_id,
+                condition=data.get("condition"),
+                order=int(data.get("order", 0)),
+            )
+        except KeyError:
+            raise PersistenceError("ChildLink data missing required field: habit_id")
+        except (TypeError, ValueError) as e:
+            raise PersistenceError(f"ChildLink deserialization failed: {e}") from e
 
 
 @dataclass
@@ -100,24 +110,41 @@ class HabitNode:
         }
 
     @classmethod
+    def _safe_enum(cls, enum_cls: type[Enum], value: str, default: Enum) -> Enum:
+        try:
+            return enum_cls(value)
+        except ValueError:
+            return default
+
+    @classmethod
     def from_dict(cls, data: dict) -> HabitNode:
-        return cls(
-            pattern_id=data["pattern_id"],
-            trigger_patterns=data.get("trigger_patterns", []),
-            embedding_vector=data.get("embedding_vector", []),
-            confidence=data.get("confidence", 0.5),
-            reinforcement_count=data.get("reinforcement_count", 0),
-            last_used_at=data.get("last_used_at", time.time()),
-            decay_score=data.get("decay_score", 0.0),
-            stability=Stability(data.get("stability", "low")),
-            risk_level=RiskLevel(data.get("risk_level", "low")),
-            response_form=ResponseForm(data.get("response_form", "fixed")),
-            response=data.get("response", ""),
-            children=[ChildLink.from_dict(c) for c in data.get("children", [])],
-            parents=data.get("parents", []),
-            is_composed=data.get("is_composed", False),
-            sequence_position=data.get("sequence_position"),
-        )
+        try:
+            pattern_id = data["pattern_id"]
+            if not isinstance(pattern_id, str) or not pattern_id:
+                raise PersistenceError("HabitNode.pattern_id must be a non-empty string")
+            return cls(
+                pattern_id=pattern_id,
+                trigger_patterns=list(data.get("trigger_patterns", [])),
+                embedding_vector=list(data.get("embedding_vector", [])),
+                confidence=float(data.get("confidence", 0.5)),
+                reinforcement_count=int(data.get("reinforcement_count", 0)),
+                last_used_at=float(data.get("last_used_at", time.time())),
+                decay_score=float(data.get("decay_score", 0.0)),
+                stability=cls._safe_enum(Stability, data.get("stability", "low"), Stability.LOW),
+                risk_level=cls._safe_enum(RiskLevel, data.get("risk_level", "low"), RiskLevel.LOW),
+                response_form=cls._safe_enum(ResponseForm, data.get("response_form", "fixed"), ResponseForm.FIXED),
+                response=str(data.get("response", "")),
+                children=[ChildLink.from_dict(c) for c in data.get("children", [])],
+                parents=list(data.get("parents", [])),
+                is_composed=bool(data.get("is_composed", False)),
+                sequence_position=data.get("sequence_position"),
+            )
+        except KeyError:
+            raise PersistenceError("HabitNode data missing required field: pattern_id")
+        except PersistenceError:
+            raise
+        except (TypeError, ValueError) as e:
+            raise PersistenceError(f"HabitNode deserialization failed: {e}") from e
 
 
 @dataclass

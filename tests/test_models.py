@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
+from cognigraph.exceptions import PersistenceError
 from cognigraph.models import (
     ChildLink,
     HabitNode,
@@ -81,6 +84,18 @@ class TestChildLink:
         link = ChildLink.from_dict({"habit_id": "node-1"})
         assert link.condition is None
         assert link.order == 0
+
+    def test_from_dict_missing_habit_id_raises(self) -> None:
+        with pytest.raises(PersistenceError, match="missing required field: habit_id"):
+            ChildLink.from_dict({})
+
+    def test_from_dict_empty_habit_id_raises(self) -> None:
+        with pytest.raises(PersistenceError, match="non-empty string"):
+            ChildLink.from_dict({"habit_id": ""})
+
+    def test_from_dict_non_string_habit_id_raises(self) -> None:
+        with pytest.raises(PersistenceError, match="non-empty string"):
+            ChildLink.from_dict({"habit_id": 123})
 
 
 class TestHabitNode:
@@ -205,6 +220,46 @@ class TestHabitNode:
         assert node.stability == Stability.LOW
         assert node.children == []
         assert node.is_composed is False
+
+    def test_from_dict_missing_pattern_id_raises(self) -> None:
+        with pytest.raises(PersistenceError, match="missing required field: pattern_id"):
+            HabitNode.from_dict({})
+
+    def test_from_dict_empty_pattern_id_raises(self) -> None:
+        with pytest.raises(PersistenceError, match="non-empty string"):
+            HabitNode.from_dict({"pattern_id": ""})
+
+    def test_from_dict_non_string_pattern_id_raises(self) -> None:
+        with pytest.raises(PersistenceError, match="non-empty string"):
+            HabitNode.from_dict({"pattern_id": 123})
+
+    def test_from_dict_invalid_enum_defaults_safely(self) -> None:
+        """Invalid enum values fall back to safe defaults instead of crashing."""
+        node = HabitNode.from_dict({
+            "pattern_id": "test",
+            "stability": "BOGUS",
+            "risk_level": "INVALID",
+            "response_form": "UNKNOWN",
+        })
+        assert node.stability == Stability.LOW
+        assert node.risk_level == RiskLevel.LOW
+        assert node.response_form == ResponseForm.FIXED
+
+    def test_from_dict_corrupted_children_raises(self) -> None:
+        with pytest.raises(PersistenceError):
+            HabitNode.from_dict({
+                "pattern_id": "test",
+                "children": [{"bad": "data"}],
+            })
+
+    def test_from_dict_wrong_type_confidence_coerced(self) -> None:
+        """String numbers are coerced to float."""
+        node = HabitNode.from_dict({"pattern_id": "test", "confidence": "0.9"})
+        assert node.confidence == 0.9
+
+    def test_from_dict_non_numeric_confidence_raises(self) -> None:
+        with pytest.raises(PersistenceError, match="deserialization failed"):
+            HabitNode.from_dict({"pattern_id": "test", "confidence": "not-a-number"})
 
 
 class TestNormalizedInput:
