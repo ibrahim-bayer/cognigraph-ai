@@ -177,14 +177,17 @@ Agents are activated automatically based on task context. Do not wait for explic
 - Investigating design questions
 - Looking up papers, benchmarks, or prior art
 
-### Testing Agent (`.claude/skills/tester.md`)
+### QA Automation Agent (`.claude/skills/tester.md`)
 **Activate when:**
 - Any new component or feature has been implemented (auto-trigger after developer work)
+- Verifying acceptance criteria before merge (pre-merge QA gate)
 - Changing graph traversal logic, thresholds, or confidence scoring
 - Modifying node creation, reinforcement, decay, or linking logic
 - A bug has been fixed (write regression test)
 - Behavioral properties need verification (learning lifecycle, sequence composition)
 - Adversarial robustness needs evaluation
+- Cross-component integration needs validation
+- Full test suite regression check requested
 
 ### Benchmark Agent (`.claude/skills/benchmarker.md`)
 **Activate when:**
@@ -236,7 +239,7 @@ Agents are activated automatically based on task context. Do not wait for explic
 ### Activation Priority
 1. **Architect** — structural and security review first
 2. **Auditor** — safety and data integrity
-3. **Testing** — correctness before optimization
+3. **QA Automation** — correctness and acceptance criteria before optimization
 4. **Benchmark** — measure before declaring done
 5. **Developer** — build what's decided
 6. **Research** — investigate when uncertain

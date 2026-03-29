@@ -35,4 +35,5 @@ class InputNormalizer:
         text = unicodedata.normalize("NFKC", text)
         text = text.lower()
         text = _WHITESPACE_RE.sub(" ", text)
+        text = text.strip()
         return NormalizedInput(original=raw_text, normalized=text)

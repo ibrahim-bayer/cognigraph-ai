@@ -92,3 +92,7 @@ class TestInputNormalizer:
         normalizer = InputNormalizer()
         result = normalizer.normalize("hello")
         assert result.normalized == "hello"
+
+    def test_control_chars_at_boundaries_stripped_clean(self) -> None:
+        result = self.normalizer.normalize("\x00 hello \x00")
+        assert result.normalized == "hello"
