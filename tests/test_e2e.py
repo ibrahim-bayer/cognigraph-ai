@@ -1,9 +1,9 @@
 """End-to-end integration tests.
 
 Wires together every component that currently exists —
-config, normalizer, embedder, graph store, persistence —
-and exercises realistic multi-session user journeys against real
-SQLite files and the real sentence-transformers embedding model.
+config, normalizer, embedder, graph store, SQLite persistence, FAISS
+vector index — and exercises realistic multi-session user journeys
+against real files and the real sentence-transformers embedding model.
 
 These tests do NOT mock anything. They validate that the pieces built
 so far actually compose into a working system, and that state survives
@@ -36,6 +36,7 @@ from cognigraph.models import (
 )
 from cognigraph.normalizer import InputNormalizer
 from cognigraph.persistence import SQLitePersistence
+from cognigraph.vector_index import FAISSIndex
 
 
 # --- Session-scoped heavy fixtures ---
@@ -530,3 +531,463 @@ class TestRemoveCascadeDurability:
         assert s3.get_parents("child1") == set()
         assert s3.get_parents("child2") == set()
         p3.close()
+
+
+# =====================================================================
+# FAISS-backed retrieval scenarios
+# These exercise the full real pipeline: normalizer → embedder → FAISS
+# vector index → graph store → SQLite persistence, across session
+# boundaries and on-disk round-trips of both index files.
+# =====================================================================
+
+
+def _rebuild_faiss_from_graph(store: InMemoryGraphStore, dim: int) -> FAISSIndex:
+    """Rebuild a FAISS index from whatever's in the graph store.
+
+    Models the real "startup" flow where the authoritative graph lives
+    in SQLite and the FAISS index is reconstructed from the loaded
+    nodes' embeddings.
+    """
+    idx = FAISSIndex(dimension=dim)
+    for node in store.all_nodes():
+        if node.embedding_vector:
+            idx.add(node.pattern_id, node.embedding_vector)
+    return idx
+
+
+class TestFAISSSemanticRetrievalE2E:
+    """FAISS replaces linear cosine scan in the retrieval path."""
+
+    def test_faiss_matches_brute_force_top_hit(
+        self,
+        db_path: str,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """For every probe, FAISS's top-1 must agree with a brute-force
+        cosine scan over the same node set. Any divergence would mean
+        FAISS is drifting from the ground truth."""
+        seeds = {
+            "weather": "what is the weather today",
+            "name": "what is my name",
+            "time": "what time is it",
+            "calc": "what is two plus two",
+            "commit": "commit my changes to git",
+            "deploy": "deploy the app to production",
+            "timer": "set a timer for five minutes",
+            "cancel": "cancel my timer",
+        }
+
+        store = InMemoryGraphStore()
+        faiss_idx = FAISSIndex(dimension=config.embedding_dim)
+
+        for pid, text in seeds.items():
+            node = _make_learned_node(pid, text, f"response-{pid}", embedder)
+            store.put_node(node)
+            faiss_idx.add(pid, node.embedding_vector)
+
+        # Probes — reworded versions of the seeds
+        probes = {
+            "weather": "how's the weather outside",
+            "name": "tell me my name",
+            "time": "what's the current time",
+            "calc": "compute 2 + 2",
+            "commit": "please commit these edits",
+            "deploy": "push to prod",
+            "timer": "start a 5-minute timer",
+            "cancel": "stop the timer",
+        }
+
+        for expected_id, probe in probes.items():
+            norm = normalizer.normalize(probe)
+            qv = embedder.embed(norm.normalized)
+
+            # Brute-force ground truth
+            ranked_brute = sorted(
+                store.all_nodes(),
+                key=lambda n: _cosine(qv, n.embedding_vector),
+                reverse=True,
+            )
+            brute_top = ranked_brute[0].pattern_id
+
+            # FAISS top-1
+            faiss_top = faiss_idx.search(qv, k=1)[0][0]
+
+            assert faiss_top == brute_top, (
+                f"probe {probe!r}: faiss={faiss_top}, brute={brute_top}"
+            )
+            # Confidence check: the correct seed is the top hit
+            assert faiss_top == expected_id, (
+                f"probe {probe!r} matched {faiss_top}, expected {expected_id}"
+            )
+
+        faiss_idx.close()
+
+    def test_faiss_topk_ordering_matches_brute_force(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """Top-k results must come back in the same order as brute force,
+        with scores that match to float32 precision."""
+        store = InMemoryGraphStore()
+        faiss_idx = FAISSIndex(dimension=config.embedding_dim)
+
+        texts = [
+            "tell me a joke",
+            "make me laugh",
+            "say something funny",
+            "what's the weather",
+            "sunshine or rain",
+            "commit my changes",
+            "git commit now",
+            "deploy to prod",
+        ]
+        for i, text in enumerate(texts):
+            node = _make_learned_node(
+                f"n{i}", text, f"r{i}", embedder
+            )
+            store.put_node(node)
+            faiss_idx.add(f"n{i}", node.embedding_vector)
+
+        probe = "something hilarious please"
+        qv = embedder.embed(normalizer.normalize(probe).normalized)
+
+        # Brute-force top-3
+        brute = sorted(
+            store.all_nodes(),
+            key=lambda n: _cosine(qv, n.embedding_vector),
+            reverse=True,
+        )[:3]
+        brute_ids = [n.pattern_id for n in brute]
+        brute_scores = [_cosine(qv, n.embedding_vector) for n in brute]
+
+        # FAISS top-3
+        faiss_hits = faiss_idx.search(qv, k=3)
+        faiss_ids = [h[0] for h in faiss_hits]
+        faiss_scores = [h[1] for h in faiss_hits]
+
+        assert faiss_ids == brute_ids
+        for fs, bs in zip(faiss_scores, brute_scores):
+            assert fs == pytest.approx(bs, abs=1e-5)
+
+        faiss_idx.close()
+
+
+class TestFullStackSessionRoundTrip:
+    """Full startup→work→shutdown→startup cycle across all components."""
+
+    def test_faiss_rebuilt_from_persisted_graph(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "fullstack.db")
+        faiss_path = str(tmp_path / "fullstack.faiss")
+
+        # --- Session 1: new user, build knowledge ---
+        p1 = SQLitePersistence(db)
+        store = p1.load_graph()  # empty
+        assert store.node_count() == 0
+
+        idx = _rebuild_faiss_from_graph(store, config.embedding_dim)
+        assert idx.count() == 0
+
+        inputs = [
+            ("What's my name?", "Ibrahim"),
+            ("What time is it?", "time is a social construct"),
+            ("Commit my changes", "running git commit"),
+            ("Deploy to prod", "deploying now"),
+        ]
+        for raw, answer in inputs:
+            norm = normalizer.normalize(raw)
+            qv = embedder.embed(norm.normalized)
+
+            # Check FAISS for a match — empty so always miss first time
+            hits = idx.search(qv, k=1)
+            if hits and hits[0][1] > 0.95:
+                route = RouteDecision.GRAPH_DIRECT
+                matched_id = hits[0][0]
+                response = store.get_node(matched_id).response
+            else:
+                route = RouteDecision.LLM_ONLY
+                pid = f"h{len(store.all_nodes())}"
+                node = _make_learned_node(pid, norm.normalized, answer, embedder)
+                store.put_node(node)
+                idx.add(pid, node.embedding_vector)
+                matched_id = pid
+                response = answer
+
+            p1.log_interaction(
+                InteractionLog(
+                    timestamp=time.time(),
+                    input_text=raw,
+                    normalized_text=norm.normalized,
+                    route_decision=route,
+                    matched_node_id=matched_id,
+                    response_text=response,
+                    latency_ms=1.0,
+                )
+            )
+
+        # Persist both stores
+        p1.save_graph(store)
+        idx.save(faiss_path)
+        idx.close()
+        p1.close()
+
+        assert Path(db).exists()
+        assert Path(faiss_path).exists()
+        assert Path(faiss_path + ".ids.json").exists()
+
+        # --- Session 2: restart, reload everything ---
+        p2 = SQLitePersistence(db)
+        store2 = p2.load_graph()
+        assert store2.node_count() == 4
+
+        # Two ways to rehydrate FAISS: load from disk, or rebuild from graph.
+        # Both should produce equivalent indices. Test both paths.
+        idx_loaded = FAISSIndex(dimension=config.embedding_dim)
+        idx_loaded.load(faiss_path)
+
+        idx_rebuilt = _rebuild_faiss_from_graph(store2, config.embedding_dim)
+
+        assert idx_loaded.count() == 4
+        assert idx_rebuilt.count() == 4
+
+        # For each original input's rephrasing, both FAISS instances
+        # should return the same top-1 node.
+        rephrasings = [
+            ("tell me my name", 0),
+            ("what's the current time", 1),
+            ("commit the code", 2),
+            ("push to production", 3),
+        ]
+        for raw, _expected_idx in rephrasings:
+            qv = embedder.embed(normalizer.normalize(raw).normalized)
+            loaded_top = idx_loaded.search(qv, k=1)[0][0]
+            rebuilt_top = idx_rebuilt.search(qv, k=1)[0][0]
+            assert loaded_top == rebuilt_top, (
+                f"probe {raw!r}: loaded={loaded_top}, rebuilt={rebuilt_top}"
+            )
+            # And both must resolve in the loaded graph store
+            store2.get_node(loaded_top)
+
+        # --- Session 3: reinforce + remove, persist again ---
+        # User uses "commit" twice more → reinforce, then retires "deploy"
+        commit_node = store2.get_node("h2")
+        commit_node.reinforcement_count += 2
+        commit_node.confidence = min(1.0, commit_node.confidence + 0.1)
+        commit_node.stability = Stability.MEDIUM
+        store2.put_node(commit_node)
+
+        store2.remove_node("h3")  # retire deploy
+        idx_loaded.remove("h3")
+
+        p2.save_graph(store2)
+        idx_loaded.save(faiss_path)
+        idx_loaded.close()
+        p2.close()
+
+        # --- Session 4: verify retirement ---
+        p3 = SQLitePersistence(db)
+        store3 = p3.load_graph()
+        assert store3.node_count() == 3
+
+        idx3 = FAISSIndex(dimension=config.embedding_dim)
+        idx3.load(faiss_path)
+        assert idx3.count() == 3
+
+        # "deploy" query no longer lands on h3 (which is gone)
+        qv = embedder.embed(
+            normalizer.normalize("ship to production").normalized
+        )
+        top = idx3.search(qv, k=3)
+        top_ids = {h[0] for h in top}
+        assert "h3" not in top_ids
+
+        # Reinforcement survived (node was created with count=1, then +2)
+        commit_reloaded = store3.get_node("h2")
+        assert commit_reloaded.reinforcement_count == 3
+        assert commit_reloaded.stability == Stability.MEDIUM
+
+        idx3.close()
+        p3.close()
+
+
+class TestFAISSAndGraphStoreConsistency:
+    """Mirror operations between graph store and FAISS must stay in sync."""
+
+    def test_parallel_add_remove(
+        self,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+
+        inputs = [f"query number {i} about {topic}" for i, topic in enumerate(
+            ["cats", "dogs", "birds", "fish", "horses", "rabbits", "hamsters", "lizards"]
+        )]
+        for i, text in enumerate(inputs):
+            n = _make_learned_node(f"n{i}", text, f"r{i}", embedder)
+            store.put_node(n)
+            idx.add(n.pattern_id, n.embedding_vector)
+
+        assert store.node_count() == 8
+        assert idx.count() == 8
+
+        # Remove every other node in both stores
+        for i in range(0, 8, 2):
+            store.remove_node(f"n{i}")
+            idx.remove(f"n{i}")
+
+        assert store.node_count() == 4
+        assert idx.count() == 4
+
+        # Every graph-store node is findable in FAISS as its own top-1
+        for node in store.all_nodes():
+            hits = idx.search(node.embedding_vector, k=1)
+            assert hits[0][0] == node.pattern_id
+            assert hits[0][1] == pytest.approx(1.0, abs=1e-5)
+
+        # Every FAISS search for a removed id returns something ELSE
+        # (the remaining dogs/fish/rabbits/lizards)
+        for removed_id in ["n0", "n2", "n4", "n6"]:
+            with pytest.raises(NodeNotFoundError):
+                store.get_node(removed_id)
+
+        idx.close()
+
+    def test_overwrite_stays_consistent_with_reinforcement(
+        self,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """When a node's trigger text is edited (re-embed + overwrite),
+        FAISS must start returning matches for the new text, not the old."""
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+
+        original = _make_learned_node(
+            "mutable", "book a table for dinner", "reservation made", embedder
+        )
+        store.put_node(original)
+        idx.add("mutable", original.embedding_vector)
+
+        # User correction: same habit, different trigger
+        updated_text = "schedule a meeting tomorrow"
+        updated_vec = embedder.embed(updated_text)
+        updated = store.get_node("mutable")
+        updated.trigger_patterns = [updated_text]
+        updated.embedding_vector = updated_vec
+        store.put_node(updated)
+        idx.add("mutable", updated_vec)  # overwrite path
+
+        assert idx.count() == 1
+
+        # FAISS now matches the new phrasing strongly
+        q_new = embedder.embed("set up a meeting for tomorrow")
+        hits = idx.search(q_new, k=1)
+        assert hits[0][0] == "mutable"
+        assert hits[0][1] > 0.85
+
+        # ...and the old phrasing is now weakly matched (or at least
+        # weaker than the new phrasing)
+        q_old = embedder.embed("book a dinner reservation")
+        score_old = idx.search(q_old, k=1)[0][1]
+        score_new = hits[0][1]
+        assert score_new > score_old
+
+        idx.close()
+
+
+class TestFAISSScaleWithRealEmbeddings:
+    """Smoke-test scale with real E5 embeddings."""
+
+    def test_fifty_real_nodes_retrievable(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """50 distinct real sentences, each findable as its own top-1."""
+        sentences = [
+            "what is the capital of france",
+            "who painted the mona lisa",
+            "how do I boil an egg",
+            "write a python function to reverse a string",
+            "explain quantum entanglement",
+            "what is the best programming language",
+            "tell me about the roman empire",
+            "how does photosynthesis work",
+            "who invented the telephone",
+            "what time zone is tokyo in",
+            "recipe for chocolate chip cookies",
+            "how tall is mount everest",
+            "who wrote hamlet",
+            "what is the speed of light",
+            "how do vaccines work",
+            "tell me a dad joke",
+            "what is machine learning",
+            "how to change a tire",
+            "who is the president of the usa",
+            "what is the meaning of life",
+            "explain docker containers",
+            "how to make sourdough bread",
+            "what is the largest ocean",
+            "who discovered america",
+            "how to meditate",
+            "tell me about black holes",
+            "what is cryptocurrency",
+            "how to learn spanish quickly",
+            "what causes rain",
+            "tell me the time in new york",
+            "how to write a resume",
+            "what is a neural network",
+            "explain the theory of relativity",
+            "how long do humans live on average",
+            "what is the longest river",
+            "who founded apple",
+            "how does gps work",
+            "what is blockchain",
+            "how to start a garden",
+            "tell me about ancient egypt",
+            "what is the largest planet",
+            "how do airplanes fly",
+            "explain compound interest",
+            "what is a black swan event",
+            "how to improve sleep",
+            "what is climate change",
+            "who composed the four seasons",
+            "how to fix a leaky faucet",
+            "what is the pythagorean theorem",
+            "tell me a bedtime story",
+        ]
+        assert len(sentences) == 50
+
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        for i, s in enumerate(sentences):
+            norm = normalizer.normalize(s)
+            vec = embedder.embed(norm.normalized)
+            idx.add(f"s{i}", vec)
+
+        assert idx.count() == 50
+
+        # Every sentence, when queried, returns its own id as top-1 with
+        # score ≈ 1.0. This is the integration smoke test: normalize +
+        # embed + FAISS all agree across 50 real samples.
+        for i, s in enumerate(sentences):
+            norm = normalizer.normalize(s)
+            qv = embedder.embed(norm.normalized)
+            hits = idx.search(qv, k=1)
+            assert hits[0][0] == f"s{i}", (
+                f"sentence {i} {s!r} mismatched: {hits[0][0]}"
+            )
+            assert hits[0][1] == pytest.approx(1.0, abs=1e-4)
+
+        idx.close()

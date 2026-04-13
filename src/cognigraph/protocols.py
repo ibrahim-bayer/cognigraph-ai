@@ -25,6 +25,25 @@ class LLMProvider(Protocol):
 
 
 @runtime_checkable
+class VectorIndexProtocol(Protocol):
+    """Contract for vector index implementations."""
+
+    def add(self, node_id: NodeId, vector: EmbeddingVector) -> None: ...
+
+    def remove(self, node_id: NodeId) -> None: ...
+
+    def search(
+        self, query_vector: EmbeddingVector, k: int = 5
+    ) -> list[tuple[NodeId, float]]: ...
+
+    def count(self) -> int: ...
+
+    def save(self, path: str) -> None: ...
+
+    def load(self, path: str) -> None: ...
+
+
+@runtime_checkable
 class GraphStoreProtocol(Protocol):
     """Contract for graph store implementations."""
 
