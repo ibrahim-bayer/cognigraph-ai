@@ -34,6 +34,7 @@ from cognigraph.models import (
     RouteDecision,
     Stability,
 )
+from cognigraph.matcher import NodeMatcher
 from cognigraph.normalizer import InputNormalizer
 from cognigraph.persistence import SQLitePersistence
 from cognigraph.vector_index import FAISSIndex
@@ -989,5 +990,308 @@ class TestFAISSScaleWithRealEmbeddings:
                 f"sentence {i} {s!r} mismatched: {hits[0][0]}"
             )
             assert hits[0][1] == pytest.approx(1.0, abs=1e-4)
+
+        idx.close()
+
+
+# =====================================================================
+# NodeMatcher end-to-end scenarios
+# Exercise the full routing layer: normalizer → embedder → matcher,
+# across cold-start, learning, reinforcement, composed skills, and
+# cross-session durability with real files and the real E5 model.
+# =====================================================================
+
+
+class TestMatcherColdStart:
+    """An empty graph routes everything to LLM_ONLY."""
+
+    def test_cold_start_routes_every_query_to_llm_only(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        for raw in ["hello", "what's my name", "make me a sandwich"]:
+            qv = embedder.embed(normalizer.normalize(raw).normalized)
+            result = matcher.match(qv)
+            assert result.node is None
+            assert result.route_decision == RouteDecision.LLM_ONLY
+            assert result.candidates == []
+
+        idx.close()
+
+
+class TestMatcherLearningLoop:
+    """Simulate a learning loop: LLM_ONLY → create → reinforce → GRAPH_DIRECT."""
+
+    def test_cold_to_confident_recall(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        raw = "what is my name?"
+        qv = embedder.embed(normalizer.normalize(raw).normalized)
+
+        # Turn 1: cold, routes to LLM
+        r1 = matcher.match(qv)
+        assert r1.route_decision == RouteDecision.LLM_ONLY
+
+        # Simulate LLM response → create a habit node at starting confidence.
+        # learning_starting_confidence defaults to 0.5 which is below the 0.7
+        # confidence_threshold, so immediately after creation it still
+        # needs reinforcement.
+        node = _make_learned_node(
+            "habit-name",
+            normalizer.normalize(raw).normalized,
+            "Ibrahim",
+            embedder,
+            confidence=config.learning_starting_confidence,
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        # Turn 2: same question, graph matches strongly but confidence is
+        # still below threshold → LLM_FALLBACK
+        r2 = matcher.match(qv)
+        assert r2.node is not None
+        assert r2.node.pattern_id == "habit-name"
+        assert r2.route_decision == RouteDecision.LLM_FALLBACK
+
+        # Reinforce repeatedly until confidence crosses the threshold
+        for _ in range(20):
+            node.confidence = min(1.0, node.confidence + config.confidence_boost)
+            node.reinforcement_count += 1
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        # Turn N: now confident → GRAPH_DIRECT
+        r3 = matcher.match(qv)
+        assert r3.route_decision == RouteDecision.GRAPH_DIRECT
+        assert r3.node.response == "Ibrahim"
+        assert r3.score > config.confidence_threshold
+
+        idx.close()
+
+
+class TestMatcherRoutesOnRealRewording:
+    """Real probes must hit GRAPH_DIRECT for in-distribution rewordings
+    and LLM_ONLY for out-of-distribution queries."""
+
+    def test_in_distribution_reworded_probe_routes_direct(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        seed = "what time is it"
+        node = _make_learned_node(
+            "time-habit", seed, "3:15 PM", embedder, confidence=0.9
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        # Reworded probe — should still match strongly
+        reworded = "tell me the current time please"
+        qv = embedder.embed(normalizer.normalize(reworded).normalized)
+        result = matcher.match(qv)
+
+        assert result.node is not None
+        assert result.node.pattern_id == "time-habit"
+        assert result.route_decision == RouteDecision.GRAPH_DIRECT
+
+        idx.close()
+
+    def test_out_of_distribution_probe_routes_llm_only(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        # Teach a bunch of habits about cooking
+        cooking = [
+            ("boil-eggs", "how do I boil an egg"),
+            ("bake-bread", "how to bake sourdough bread"),
+            ("grill-steak", "best way to grill a steak"),
+        ]
+        for pid, text in cooking:
+            node = _make_learned_node(pid, text, "answer", embedder, confidence=0.95)
+            store.put_node(node)
+            idx.add(pid, node.embedding_vector)
+
+        # Completely unrelated probe
+        probe = "who was the 16th president of the united states"
+        qv = embedder.embed(normalizer.normalize(probe).normalized)
+        result = matcher.match(qv)
+
+        # With real E5 the sim between unrelated sentences can still be in
+        # the 0.6-0.75 range because all inputs are English questions, so
+        # accept either LLM_ONLY or LLM_FALLBACK — the point is it must
+        # NOT be GRAPH_DIRECT or GRAPH_COMPOSED.
+        assert result.route_decision in (
+            RouteDecision.LLM_ONLY,
+            RouteDecision.LLM_FALLBACK,
+        )
+
+        idx.close()
+
+
+class TestMatcherComposedSkillRouting:
+    """A matched composed root routes GRAPH_COMPOSED, not GRAPH_DIRECT."""
+
+    def test_composed_root_matched_via_fuzzy_query(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        # Build git commit chain
+        root = _make_learned_node(
+            "commit-root",
+            "commit my changes",
+            "running commit workflow",
+            embedder,
+            confidence=0.95,
+            stability=Stability.HIGH,
+        )
+        store.put_node(root)
+        idx.add(root.pattern_id, root.embedding_vector)
+
+        for i, (pid, text) in enumerate([
+            ("stage", "git stage files"),
+            ("write", "draft commit message"),
+            ("run", "run git commit"),
+            ("verify", "check git status"),
+        ]):
+            n = _make_learned_node(pid, text, f"step-{pid}", embedder, confidence=0.9)
+            store.put_node(n)
+            idx.add(pid, n.embedding_vector)
+            store.add_link("commit-root", ChildLink(habit_id=pid, order=i))
+
+        # Fuzzy, reworded probe
+        probe = "please save my edits to the repo"
+        qv = embedder.embed(normalizer.normalize(probe).normalized)
+        result = matcher.match(qv)
+
+        assert result.node is not None
+        assert result.node.pattern_id == "commit-root"
+        assert result.route_decision == RouteDecision.GRAPH_COMPOSED
+
+        idx.close()
+
+
+class TestMatcherCrossSession:
+    """Matcher behavior survives save/load of graph + FAISS index."""
+
+    def test_matcher_on_reloaded_stack(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "matcher.db")
+        faiss_path = str(tmp_path / "matcher.faiss")
+
+        # --- S1: train ---
+        p1 = SQLitePersistence(db)
+        store = p1.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+
+        for pid, text in [
+            ("weather", "what's the weather today"),
+            ("joke", "tell me a joke"),
+            ("commit", "commit my changes to git"),
+        ]:
+            n = _make_learned_node(pid, text, f"r-{pid}", embedder, confidence=0.95)
+            store.put_node(n)
+            idx.add(pid, n.embedding_vector)
+
+        p1.save_graph(store)
+        idx.save(faiss_path)
+        idx.close()
+        p1.close()
+
+        # --- S2: reload + match ---
+        p2 = SQLitePersistence(db)
+        store2 = p2.load_graph()
+        idx2 = FAISSIndex(dimension=config.embedding_dim)
+        idx2.load(faiss_path)
+        matcher = NodeMatcher(store2, idx2, config)
+
+        probes = [
+            ("how's the weather outside", "weather", RouteDecision.GRAPH_DIRECT),
+            ("make me laugh", "joke", RouteDecision.GRAPH_DIRECT),
+            ("push my code edits", "commit", RouteDecision.GRAPH_DIRECT),
+        ]
+        for raw, expected_id, expected_route in probes:
+            qv = embedder.embed(normalizer.normalize(raw).normalized)
+            result = matcher.match(qv)
+            assert result.node is not None, f"probe {raw!r} unexpectedly missed"
+            assert result.node.pattern_id == expected_id
+            assert result.route_decision == expected_route
+
+        idx2.close()
+        p2.close()
+
+
+class TestMatcherConflictDetection:
+    """When two similar nodes are close in score, candidates expose both
+    so the learning loop can flag conflict."""
+
+    def test_candidates_reveal_ambiguity(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        # Two competing habits for almost the same intent
+        a = _make_learned_node(
+            "weather-today", "what's the weather today", "sunny", embedder, confidence=0.8
+        )
+        b = _make_learned_node(
+            "weather-now", "what is the weather right now", "sunny", embedder, confidence=0.8
+        )
+        for n in (a, b):
+            store.put_node(n)
+            idx.add(n.pattern_id, n.embedding_vector)
+
+        probe = "tell me today's weather"
+        qv = embedder.embed(normalizer.normalize(probe).normalized)
+        result = matcher.match(qv)
+
+        assert result.node is not None
+        # Both candidates present
+        ids = {c[0] for c in result.candidates}
+        assert "weather-today" in ids
+        assert "weather-now" in ids
+        # Gap between top-2 scores is small (conflict signal)
+        sorted_scores = sorted((c[1] for c in result.candidates), reverse=True)
+        gap = sorted_scores[0] - sorted_scores[1]
+        assert gap < 0.2  # < 0.2 is "close call" territory for near-dupes
 
         idx.close()

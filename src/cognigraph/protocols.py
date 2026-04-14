@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from cognigraph.models import HabitNode, ChildLink
-from cognigraph.types import NodeId, EmbeddingVector, LLMResponse
+from cognigraph.models import ChildLink, HabitNode, MatchResult
+from cognigraph.types import EmbeddingVector, LLMResponse, NodeId
 
 
 @runtime_checkable
@@ -41,6 +41,13 @@ class VectorIndexProtocol(Protocol):
     def save(self, path: str) -> None: ...
 
     def load(self, path: str) -> None: ...
+
+
+@runtime_checkable
+class NodeMatcherProtocol(Protocol):
+    """Contract for node matcher implementations."""
+
+    def match(self, embedding: EmbeddingVector) -> MatchResult: ...
 
 
 @runtime_checkable

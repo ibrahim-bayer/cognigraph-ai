@@ -168,3 +168,27 @@ class InteractionLog:
     llm_response: str | None = None
     response_text: str = ""
     latency_ms: float = 0.0
+
+
+@dataclass
+class MatchResult:
+    """Outcome of a NodeMatcher.match() call.
+
+    - `node`: the winning HabitNode, or None when route is LLM_ONLY and
+      no viable candidate exists.
+    - `score`: combined score (similarity * confidence), clamped to [0, 1].
+    - `similarity`: raw cosine similarity of the winning candidate (clamped
+      to [0, 1]), or 0.0 if no winner. Useful for logging distinct from `score`.
+    - `route_decision`: one of the four RouteDecision values.
+    - `candidates`: raw FAISS hits (node_id, similarity), top-k DESC.
+      Preserved even when `node` is None so the learner can see drift.
+    - `ambiguous`: True when the top-1 and top-2 combined scores are within
+      `config.ambiguity_gap`, signalling a close-call routing decision.
+    """
+
+    node: HabitNode | None
+    score: float
+    similarity: float
+    route_decision: RouteDecision
+    candidates: list = field(default_factory=list)
+    ambiguous: bool = False

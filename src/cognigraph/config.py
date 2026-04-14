@@ -132,6 +132,14 @@ class CogniGraphConfig:
                 f"similarity_threshold ({self.similarity_threshold})"
             )
 
+        if self.confidence_threshold >= 1.0:
+            raise ValueError(
+                f"confidence_threshold ({self.confidence_threshold}) must be "
+                f"< 1.0, otherwise no node can ever reach it (confidence "
+                f"asymptotes to 1.0 via reinforcement) and GRAPH_DIRECT is "
+                f"unreachable"
+            )
+
         if self.stability_medium_threshold >= self.stability_high_threshold:
             raise ValueError(
                 f"stability_medium_threshold ({self.stability_medium_threshold}) must be less than "
