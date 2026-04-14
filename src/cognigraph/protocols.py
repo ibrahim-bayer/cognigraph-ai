@@ -21,7 +21,13 @@ class EmbeddingProvider(Protocol):
 class LLMProvider(Protocol):
     """Contract for LLM implementations."""
 
-    def generate(self, prompt: str, context: list[dict] | None = None) -> LLMResponse: ...
+    def generate(
+        self,
+        prompt: str,
+        context: list[dict] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse: ...
 
 
 @runtime_checkable

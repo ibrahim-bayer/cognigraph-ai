@@ -34,6 +34,8 @@ from cognigraph.models import (
     RouteDecision,
     Stability,
 )
+from cognigraph.exceptions import LLMPermanentError, LLMRetriableError
+from cognigraph.llm_client import ClaudeLLMProvider
 from cognigraph.matcher import NodeMatcher
 from cognigraph.normalizer import InputNormalizer
 from cognigraph.persistence import SQLitePersistence
@@ -1295,3 +1297,378 @@ class TestMatcherConflictDetection:
         assert gap < 0.2  # < 0.2 is "close call" territory for near-dupes
 
         idx.close()
+
+
+# =====================================================================
+# ClaudeLLMProvider end-to-end scenarios
+# Exercise the full pipeline through the real provider code path using
+# an injected fake anthropic client (no network). The provider's code —
+# message building, error classification, latency tracking, token
+# accounting, context validation — runs exactly as it will in prod.
+# =====================================================================
+
+
+class _FakeAnthropicUsage:
+    def __init__(self, input_tokens: int = 10, output_tokens: int = 20) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+class _FakeTextBlock:
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _FakeAnthropicResponse:
+    def __init__(self, text: str, model: str = "claude-test") -> None:
+        self.content = [_FakeTextBlock(text)]
+        self.model = model
+        self.usage = _FakeAnthropicUsage()
+
+
+class _FakeAnthropicMessagesAPI:
+    """Stateful fake: answers from a lookup table and records every call."""
+
+    def __init__(self) -> None:
+        self.answers: dict[str, str] = {}
+        self.default_answer: str = "I'm not sure — let me think about it."
+        self.calls: list[dict] = []
+        self.error_to_raise: Exception | None = None
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error_to_raise is not None:
+            err = self.error_to_raise
+            self.error_to_raise = None  # one-shot so subsequent calls succeed
+            raise err
+
+        # Pick a response by matching the trailing user message against
+        # the answers table (case-insensitive substring match).
+        last_user = next(
+            (
+                m["content"]
+                for m in reversed(kwargs.get("messages", []))
+                if m.get("role") == "user"
+            ),
+            "",
+        )
+        needle = last_user.lower()
+        text = self.default_answer
+        for key, answer in self.answers.items():
+            if key.lower() in needle:
+                text = answer
+                break
+        return _FakeAnthropicResponse(text, model=kwargs.get("model", "claude-test"))
+
+
+class _FakeAnthropicClient:
+    def __init__(self) -> None:
+        self.messages = _FakeAnthropicMessagesAPI()
+
+
+class TestLLMProviderInPipeline:
+    """Full graph-first pipeline with real ClaudeLLMProvider, fake backend."""
+
+    def test_learning_loop_through_real_llm_provider(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """Cold start → LLM fallback → node creation → reinforcement → direct recall.
+
+        Unlike the earlier matcher learning-loop test which hand-codes
+        LLM responses, this one routes every fallback through
+        ClaudeLLMProvider.generate() so the provider's own code —
+        latency tracking, token accounting, error handling — runs."""
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        fake_client = _FakeAnthropicClient()
+        fake_client.messages.answers = {
+            "name": "Ibrahim",
+            "weather": "sunny, 72°F",
+            "time": "3:15 PM",
+        }
+        llm = ClaudeLLMProvider(
+            api_key="test-key",
+            model="claude-test",
+            config=config,
+            client=fake_client,
+        )
+
+        system_prompt = (
+            "You are the cognitive fallback for a learned graph agent. "
+            "Answer concisely."
+        )
+
+        # --- Turn 1: novel input → LLM_ONLY → call LLM → create node ---
+        raw = "what's my name?"
+        norm = normalizer.normalize(raw)
+        qv = embedder.embed(norm.normalized)
+        match = matcher.match(qv)
+        assert match.route_decision == RouteDecision.LLM_ONLY
+
+        llm_response = llm.generate(
+            prompt=norm.normalized, system=system_prompt
+        )
+        assert llm_response.text == "Ibrahim"
+        assert llm_response.latency_ms >= 0
+        assert llm_response.input_tokens == 10
+        assert llm_response.output_tokens == 20
+        assert llm_response.model == "claude-test"
+
+        # Confirm the provider passed through system + model + max_tokens
+        last_call = fake_client.messages.calls[-1]
+        assert last_call["system"] == system_prompt
+        assert last_call["model"] == "claude-test"
+        assert last_call["max_tokens"] == config.llm_max_tokens
+
+        node = _make_learned_node(
+            "habit-name",
+            norm.normalized,
+            llm_response.text,
+            embedder,
+            confidence=config.learning_starting_confidence,
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        # --- Turn 2: same intent, reworded — still fallback (low conf) ---
+        qv2 = embedder.embed(normalizer.normalize("tell me my name").normalized)
+        match2 = matcher.match(qv2)
+        assert match2.node is not None
+        assert match2.node.pattern_id == "habit-name"
+        assert match2.route_decision == RouteDecision.LLM_FALLBACK
+
+        # Fallback path still calls the LLM, but passes the graph hit as
+        # context. Verify the provider correctly threads context through.
+        followup = llm.generate(
+            prompt="tell me my name",
+            context=[
+                {"role": "user", "content": norm.normalized},
+                {"role": "assistant", "content": llm_response.text},
+            ],
+            system=system_prompt,
+        )
+        assert followup.text == "Ibrahim"
+        last_call = fake_client.messages.calls[-1]
+        assert [m["role"] for m in last_call["messages"]] == [
+            "user",
+            "assistant",
+            "user",
+        ]
+        assert last_call["messages"][-1]["content"] == "tell me my name"
+
+        # --- Reinforce to confident ---
+        for _ in range(20):
+            node.confidence = min(1.0, node.confidence + config.confidence_boost)
+            node.reinforcement_count += 1
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        # --- Turn N: now GRAPH_DIRECT — no LLM call needed ---
+        call_count_before = len(fake_client.messages.calls)
+        match3 = matcher.match(qv)
+        assert match3.route_decision == RouteDecision.GRAPH_DIRECT
+        # The pipeline would short-circuit the LLM here; prove nothing
+        # new was sent to the fake client between turn 2 and now.
+        assert len(fake_client.messages.calls) == call_count_before
+
+        llm.close()
+        idx.close()
+
+    def test_llm_retriable_error_surfaces_through_pipeline(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """A rate-limit-style transient error must reach the caller as
+        LLMRetriableError (not a generic LLMError) so pipeline retry
+        logic can distinguish it from permanent failures."""
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        fake_client = _FakeAnthropicClient()
+        llm = ClaudeLLMProvider(
+            api_key="k", model="claude-test", config=config, client=fake_client
+        )
+
+        # Inject a rate-limit error (classified by class name)
+        rate_limit_cls = type("RateLimitError", (Exception,), {})
+        fake_client.messages.error_to_raise = rate_limit_cls("please slow down")
+
+        raw = "what's the weather"
+        qv = embedder.embed(normalizer.normalize(raw).normalized)
+        match = matcher_for(store, idx, config).match(qv)
+        assert match.route_decision == RouteDecision.LLM_ONLY
+
+        with pytest.raises(LLMRetriableError, match="RateLimitError"):
+            llm.generate(normalizer.normalize(raw).normalized)
+
+        # Subsequent call after the one-shot error should succeed,
+        # proving the fake client state is clean and the provider is
+        # re-usable after an error.
+        fake_client.messages.answers = {"weather": "sunny"}
+        result = llm.generate(normalizer.normalize(raw).normalized)
+        assert result.text == "sunny"
+
+        llm.close()
+        idx.close()
+
+    def test_llm_permanent_error_surfaces_through_pipeline(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """An authentication error must reach the caller as
+        LLMPermanentError so the pipeline does NOT retry it."""
+        fake_client = _FakeAnthropicClient()
+        llm = ClaudeLLMProvider(
+            api_key="k", model="claude-test", config=config, client=fake_client
+        )
+        auth_cls = type("AuthenticationError", (Exception,), {})
+        fake_client.messages.error_to_raise = auth_cls("bad api key")
+
+        with pytest.raises(LLMPermanentError, match="AuthenticationError"):
+            llm.generate("hi")
+
+        llm.close()
+
+    def test_llm_context_round_trip_across_multiple_turns(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """A multi-turn conversation accumulates context and each turn
+        sees the full history through the real provider."""
+        fake_client = _FakeAnthropicClient()
+        fake_client.messages.default_answer = "OK"
+        llm = ClaudeLLMProvider(
+            api_key="k", model="claude-test", config=config, client=fake_client
+        )
+
+        history: list[dict] = []
+        turns = [
+            "hi",
+            "how are you",
+            "tell me a joke",
+            "make it shorter",
+        ]
+        for turn in turns:
+            resp = llm.generate(
+                prompt=normalizer.normalize(turn).normalized,
+                context=history if history else None,
+            )
+            history.append({"role": "user", "content": normalizer.normalize(turn).normalized})
+            history.append({"role": "assistant", "content": resp.text})
+
+        # The final call should have seen 3 prior user/assistant pairs
+        # plus the final user turn = 7 messages
+        last_call = fake_client.messages.calls[-1]
+        assert len(last_call["messages"]) == 7
+        assert last_call["messages"][-1]["role"] == "user"
+        assert last_call["messages"][-1]["content"] == "make it shorter"
+
+        # Roles strictly alternate
+        roles = [m["role"] for m in last_call["messages"]]
+        assert roles == ["user", "assistant"] * 3 + ["user"]
+
+        llm.close()
+
+    def test_llm_invalid_context_rejected_before_sdk_call(
+        self,
+        config: CogniGraphConfig,
+    ) -> None:
+        """Bad context (ends in user) must raise LLMPermanentError
+        before ever calling the SDK. Proves the validation lives in the
+        provider, not at some downstream layer."""
+        fake_client = _FakeAnthropicClient()
+        llm = ClaudeLLMProvider(
+            api_key="k", model="claude-test", config=config, client=fake_client
+        )
+
+        with pytest.raises(LLMPermanentError):
+            llm.generate(
+                "final",
+                context=[
+                    {"role": "user", "content": "a"},
+                    {"role": "assistant", "content": "b"},
+                    {"role": "user", "content": "c"},  # ends in user → reject
+                ],
+            )
+        # Verify the SDK was NOT called
+        assert fake_client.messages.calls == []
+
+        llm.close()
+
+    def test_llm_response_persisted_as_interaction_log(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """A full pipeline turn including LLM fallback is logged to SQLite
+        with all fields populated from the real LLMResponse."""
+        db = str(tmp_path / "llm_e2e.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+
+        fake_client = _FakeAnthropicClient()
+        fake_client.messages.answers = {"time": "3:15 PM"}
+        llm = ClaudeLLMProvider(
+            api_key="k", model="claude-test", config=config, client=fake_client
+        )
+
+        raw = "what time is it"
+        norm = normalizer.normalize(raw)
+        qv = embedder.embed(norm.normalized)
+        match = matcher.match(qv)
+        assert match.route_decision == RouteDecision.LLM_ONLY
+
+        turn_start = time.time()
+        llm_response = llm.generate(norm.normalized)
+
+        # Log the interaction with real LLM fields
+        p.log_interaction(
+            InteractionLog(
+                timestamp=turn_start,
+                input_text=raw,
+                normalized_text=norm.normalized,
+                route_decision=RouteDecision.LLM_ONLY,
+                matched_node_id=None,
+                llm_response=llm_response.text,
+                response_text=llm_response.text,
+                latency_ms=llm_response.latency_ms,
+            )
+        )
+        p.close()
+
+        # Reopen and verify
+        p2 = SQLitePersistence(db)
+        logs = p2.get_interactions()
+        assert len(logs) == 1
+        assert logs[0].llm_response == "3:15 PM"
+        assert logs[0].response_text == "3:15 PM"
+        assert logs[0].route_decision == RouteDecision.LLM_ONLY
+        assert logs[0].latency_ms == pytest.approx(llm_response.latency_ms, abs=0.1)
+
+        llm.close()
+        idx.close()
+        p2.close()
+
+
+def matcher_for(
+    store: InMemoryGraphStore,
+    idx: FAISSIndex,
+    config: CogniGraphConfig,
+) -> NodeMatcher:
+    """Small helper used by the retriable-error test."""
+    return NodeMatcher(store, idx, config)

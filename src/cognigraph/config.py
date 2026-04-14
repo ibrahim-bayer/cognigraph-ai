@@ -63,8 +63,10 @@ class CogniGraphConfig:
     faiss_search_k: int = 5
 
     # --- LLM ---
-    llm_model: str = "claude-sonnet-4-20250514"
+    llm_model: str = "claude-sonnet-4-5"
     llm_max_tokens: int = 1024
+    llm_timeout_seconds: float = 30.0
+    llm_max_retries: int = 2
 
     # --- Safety ---
     ambiguity_gap: float = 0.05
@@ -114,6 +116,11 @@ class CogniGraphConfig:
         self._check_positive("llm_max_tokens", self.llm_max_tokens)
         self._check_positive("max_input_length", self.max_input_length)
         self._check_positive("max_response_length", self.max_response_length)
+        self._check_positive("llm_timeout_seconds", self.llm_timeout_seconds)
+        if self.llm_max_retries < 0:
+            raise ValueError(
+                f"llm_max_retries must be >= 0, got {self.llm_max_retries}"
+            )
 
         for weight_name in (
             "strength_weight_frequency",

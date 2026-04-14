@@ -20,8 +20,10 @@ class TestConfigDefaults:
         assert cfg.embedding_model == "intfloat/e5-small-v2"
         assert cfg.embedding_dim == 384
         assert cfg.faiss_search_k == 5
-        assert cfg.llm_model == "claude-sonnet-4-20250514"
+        assert cfg.llm_model == "claude-sonnet-4-5"
         assert cfg.llm_max_tokens == 1024
+        assert cfg.llm_timeout_seconds == 30.0
+        assert cfg.llm_max_retries == 2
         assert cfg.ambiguity_gap == 0.05
         assert cfg.blocklist_patterns == []
         assert cfg.max_response_length == 4096

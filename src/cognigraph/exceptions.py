@@ -21,6 +21,14 @@ class LLMError(CogniGraphError):
     """Raised when the LLM API call fails."""
 
 
+class LLMRetriableError(LLMError):
+    """LLM failure that the caller may safely retry (rate limit, timeout, transient network)."""
+
+
+class LLMPermanentError(LLMError):
+    """LLM failure that will not succeed on retry (auth, bad request, permission denied)."""
+
+
 class SafetyViolationError(CogniGraphError):
     """Raised when the safety boundary is triggered."""
 
