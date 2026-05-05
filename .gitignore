@@ -20,3 +20,10 @@ venv/
 
 # OS
 .DS_Store
+
+# Scratch data (smoke test DBs, FAISS binaries)
+scratch/*.db
+scratch/*.db-wal
+scratch/*.db-shm
+scratch/*.faiss
+scratch/*.faiss.ids.json
