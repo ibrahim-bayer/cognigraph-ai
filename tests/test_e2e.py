@@ -39,6 +39,7 @@ from cognigraph.llm_client import ClaudeLLMProvider
 from cognigraph.matcher import NodeMatcher
 from cognigraph.normalizer import InputNormalizer
 from cognigraph.persistence import SQLitePersistence
+from cognigraph.reinforcement import ReinforcementLogger
 from cognigraph.vector_index import FAISSIndex
 
 
@@ -84,15 +85,21 @@ def _make_learned_node(
     embedder: EmbeddingService,
     confidence: float = 0.6,
     stability: Stability = Stability.LOW,
+    reinforcement_count: int = 0,
 ) -> HabitNode:
-    """Build a node as the learning loop would: real embedding of a real trigger."""
+    """Build a node as the learning loop would: real embedding of a real trigger.
+
+    `reinforcement_count` defaults to 0 — a brand-new node hasn't been
+    used yet. Tests that need to seed a "previously-used" node should
+    pass an explicit count.
+    """
     vec = embedder.embed(trigger_text)
     return HabitNode(
         pattern_id=pattern_id,
         trigger_patterns=[trigger_text],
         embedding_vector=vec,
         confidence=confidence,
-        reinforcement_count=1,
+        reinforcement_count=reinforcement_count,
         last_used_at=time.time(),
         stability=stability,
         risk_level=RiskLevel.LOW,
@@ -198,7 +205,8 @@ class TestSingleSessionLearnAndRecall:
         assert reloaded.node_count() == 1
         restored = reloaded.get_node("habit-name")
         assert restored.response == "Ibrahim"
-        assert restored.reinforcement_count == 2
+        # Helper seeds at count=0; we incremented once on Turn 2 → 1
+        assert restored.reinforcement_count == 1
         assert restored.confidence == pytest.approx(0.7, abs=1e-6)
         # Embedding survived JSON round-trip
         assert len(restored.embedding_vector) == 384
@@ -813,9 +821,9 @@ class TestFullStackSessionRoundTrip:
         top_ids = {h[0] for h in top}
         assert "h3" not in top_ids
 
-        # Reinforcement survived (node was created with count=1, then +2)
+        # Reinforcement survived (node was created with count=0, then +2)
         commit_reloaded = store3.get_node("h2")
-        assert commit_reloaded.reinforcement_count == 3
+        assert commit_reloaded.reinforcement_count == 2
         assert commit_reloaded.stability == Stability.MEDIUM
 
         idx3.close()
@@ -1672,3 +1680,226 @@ def matcher_for(
 ) -> NodeMatcher:
     """Small helper used by the retriable-error test."""
     return NodeMatcher(store, idx, config)
+
+
+# =====================================================================
+# ReinforcementLogger end-to-end scenarios
+# Drive a node from cold creation through MEDIUM and HIGH stability
+# tiers with the real logger writing to real SQLite, and verify the
+# state survives close+reopen across the stability boundary.
+# =====================================================================
+
+
+class TestReinforcementLifecycleE2E:
+    """Cold→MEDIUM→HIGH driven by ReinforcementLogger, real persistence."""
+
+    def test_node_climbs_stability_tiers_via_logger(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "reinf_e2e.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        rl = ReinforcementLogger(store, p, config)
+
+        # Seed a confident node so the matcher routes GRAPH_DIRECT every turn
+        node = _make_learned_node(
+            "habit",
+            "what is my name",
+            "Ibrahim",
+            embedder,
+            confidence=0.95,
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        # Helper: run a turn and reinforce
+        def _drive_one_turn() -> None:
+            qv = embedder.embed(normalizer.normalize("what is my name").normalized)
+            match = matcher.match(qv)
+            assert match.route_decision == RouteDecision.GRAPH_DIRECT
+            log = InteractionLog(
+                timestamp=time.time(),
+                input_text="what is my name",
+                normalized_text="what is my name",
+                route_decision=match.route_decision,
+                matched_node_id=match.node.pattern_id,
+                response_text=match.node.response,
+                latency_ms=1.0,
+            )
+            assert rl.log_and_reinforce(log) is True
+
+        # 4 reinforcements → still LOW
+        for _ in range(4):
+            _drive_one_turn()
+        assert store.get_node("habit").reinforcement_count == 4
+        assert store.get_node("habit").stability == Stability.LOW
+
+        # 5th → MEDIUM
+        _drive_one_turn()
+        assert store.get_node("habit").reinforcement_count == 5
+        assert store.get_node("habit").stability == Stability.MEDIUM
+
+        # 14 more → still MEDIUM (count=19)
+        for _ in range(14):
+            _drive_one_turn()
+        assert store.get_node("habit").reinforcement_count == 19
+        assert store.get_node("habit").stability == Stability.MEDIUM
+
+        # 20th → HIGH
+        _drive_one_turn()
+        assert store.get_node("habit").reinforcement_count == 20
+        assert store.get_node("habit").stability == Stability.HIGH
+
+        # Confidence saturated at 1.0 after the boost capacity
+        assert store.get_node("habit").confidence == 1.0
+
+        # Interaction log captured every turn
+        history = rl.get_node_history("habit")
+        assert len(history) == 20
+
+        idx.close()
+        p.close()
+
+    def test_stability_persists_across_close_reopen(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "reinf_persist.db")
+
+        # --- Session 1: drive to MEDIUM ---
+        p1 = SQLitePersistence(db)
+        store = p1.load_graph()
+        idx1 = FAISSIndex(dimension=config.embedding_dim)
+        matcher1 = NodeMatcher(store, idx1, config)
+        rl1 = ReinforcementLogger(store, p1, config)
+
+        node = _make_learned_node(
+            "habit",
+            "what's my name",
+            "Ibrahim",
+            embedder,
+            confidence=0.9,
+        )
+        store.put_node(node)
+        idx1.add(node.pattern_id, node.embedding_vector)
+
+        for _ in range(5):
+            qv = embedder.embed(normalizer.normalize("what's my name").normalized)
+            match = matcher1.match(qv)
+            rl1.log_and_reinforce(
+                InteractionLog(
+                    timestamp=time.time(),
+                    input_text="what's my name",
+                    normalized_text="what's my name",
+                    route_decision=match.route_decision,
+                    matched_node_id=match.node.pattern_id,
+                    response_text=match.node.response,
+                    latency_ms=1.0,
+                )
+            )
+        assert store.get_node("habit").stability == Stability.MEDIUM
+        assert store.get_node("habit").reinforcement_count == 5
+
+        p1.save_graph(store)
+        idx1.close()
+        p1.close()
+
+        # --- Session 2: reload and continue to HIGH ---
+        p2 = SQLitePersistence(db)
+        store2 = p2.load_graph()
+        # Sanity: stability survived the round-trip
+        assert store2.get_node("habit").stability == Stability.MEDIUM
+        assert store2.get_node("habit").reinforcement_count == 5
+        assert store2.node_count() == 1
+
+        idx2 = FAISSIndex(dimension=config.embedding_dim)
+        for n in store2.all_nodes():
+            idx2.add(n.pattern_id, n.embedding_vector)
+        matcher2 = NodeMatcher(store2, idx2, config)
+        rl2 = ReinforcementLogger(store2, p2, config)
+
+        # 15 more reinforcements → 20 total → HIGH
+        for _ in range(15):
+            qv = embedder.embed(normalizer.normalize("what's my name").normalized)
+            match = matcher2.match(qv)
+            rl2.log_and_reinforce(
+                InteractionLog(
+                    timestamp=time.time(),
+                    input_text="what's my name",
+                    normalized_text="what's my name",
+                    route_decision=match.route_decision,
+                    matched_node_id=match.node.pattern_id,
+                    response_text=match.node.response,
+                    latency_ms=1.0,
+                )
+            )
+        assert store2.get_node("habit").reinforcement_count == 20
+        assert store2.get_node("habit").stability == Stability.HIGH
+
+        # Full history visible across sessions: 5 + 15 = 20 entries
+        history = rl2.get_node_history("habit")
+        assert len(history) == 20
+
+        idx2.close()
+        p2.close()
+
+    def test_logger_skips_reinforcement_for_llm_routes_in_pipeline(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """When the matcher returns LLM_FALLBACK or LLM_ONLY, the logger
+        records the interaction but does NOT touch the matched node."""
+        db = str(tmp_path / "reinf_norein.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        rl = ReinforcementLogger(store, p, config)
+
+        # Low-confidence node → matcher returns LLM_FALLBACK
+        node = _make_learned_node(
+            "weak", "tell me a joke", "...", embedder, confidence=0.3
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        starting_count = store.get_node("weak").reinforcement_count
+        starting_conf = store.get_node("weak").confidence
+
+        qv = embedder.embed(normalizer.normalize("tell me a joke").normalized)
+        match = matcher.match(qv)
+        assert match.route_decision == RouteDecision.LLM_FALLBACK
+
+        result = rl.log_and_reinforce(
+            InteractionLog(
+                timestamp=time.time(),
+                input_text="tell me a joke",
+                normalized_text="tell me a joke",
+                route_decision=match.route_decision,
+                matched_node_id=match.node.pattern_id,
+                response_text="(LLM answer)",
+                latency_ms=10.0,
+            )
+        )
+        # Logger declined to reinforce
+        assert result is False
+        assert store.get_node("weak").reinforcement_count == starting_count
+        assert store.get_node("weak").confidence == starting_conf
+
+        # But the interaction was still logged
+        assert len(p.get_interactions()) == 1
+
+        idx.close()
+        p.close()

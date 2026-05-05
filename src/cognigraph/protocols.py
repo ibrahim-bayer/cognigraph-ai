@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from cognigraph.models import ChildLink, HabitNode, MatchResult
+from cognigraph.models import ChildLink, HabitNode, InteractionLog, MatchResult
 from cognigraph.types import EmbeddingVector, LLMResponse, NodeId
 
 
@@ -54,6 +54,36 @@ class NodeMatcherProtocol(Protocol):
     """Contract for node matcher implementations."""
 
     def match(self, embedding: EmbeddingVector) -> MatchResult: ...
+
+
+@runtime_checkable
+class PersistenceProtocol(Protocol):
+    """Contract for persistence backends (interaction log + graph snapshots).
+
+    Only the methods the reinforcement logger actually uses are required;
+    full graph save/load lives on the concrete SQLitePersistence class.
+    """
+
+    def log_interaction(self, log: InteractionLog) -> None: ...
+
+    def get_interactions(
+        self, limit: int = 100, offset: int = 0
+    ) -> list[InteractionLog]: ...
+
+    def get_interactions_for_node(
+        self, node_id: NodeId
+    ) -> list[InteractionLog]: ...
+
+
+@runtime_checkable
+class ReinforcementLoggerProtocol(Protocol):
+    """Contract for reinforcement logger implementations."""
+
+    def log_and_reinforce(self, interaction: InteractionLog) -> bool: ...
+
+    def get_node_history(
+        self, node_id: NodeId, limit: int | None = 100
+    ) -> list[InteractionLog]: ...
 
 
 @runtime_checkable
