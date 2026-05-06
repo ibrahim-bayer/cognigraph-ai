@@ -29,8 +29,31 @@ class CogniGraphConfig:
 
     # --- Learning ---
     learning_min_repetitions: int = 3
-    learning_stability_threshold: float = 0.9
     learning_starting_confidence: float = 0.5
+    # How far back to scan when grouping similar interactions for
+    # node-creation. Bounds embedding cost per evaluation.
+    learning_lookback_window: int = 100
+    # Two thresholds, deliberately separated (architect B2):
+    # - input clustering: gates which past interactions count as "same
+    #   intent" when forming a cluster.
+    # - response stability: gates whether cluster responses agree
+    #   strongly enough to crystallize into a node.
+    # Defaults are equal at 0.9 because E5-Small's representational
+    # ceiling for short conversational questions puts cross-intent
+    # similarity at 0.82-0.90 — a looser input threshold lets cross-
+    # intent contamination slip in, which the response stability gate
+    # then rejects. Operators with a stronger embedding model can
+    # safely lower learning_input_cluster_threshold independently.
+    learning_input_cluster_threshold: float = 0.9
+    learning_response_stability_threshold: float = 0.9
+    # Backwards-compat alias (kept so external configs continue working).
+    # The learner reads from the explicit threshold names above.
+    learning_stability_threshold: float = 0.9
+    # Dedup threshold for the issue-#22 check: when an existing node's
+    # input embedding is at least this close to the candidate AND the
+    # response embeddings are at least this close, the new interaction
+    # is treated as already covered.
+    learning_dedup_threshold: float = 0.85
 
     # --- Reinforcement ---
     confidence_boost: float = 0.02
@@ -103,10 +126,25 @@ class CogniGraphConfig:
         self._check_range("decay_rate_high", self.decay_rate_high, 0.0, 1.0)
         self._check_range("decay_rate_medium", self.decay_rate_medium, 0.0, 1.0)
         self._check_range("decay_rate_low", self.decay_rate_low, 0.0, 1.0)
+        self._check_range("learning_dedup_threshold", self.learning_dedup_threshold, 0.0, 1.0)
+        self._check_range(
+            "learning_input_cluster_threshold",
+            self.learning_input_cluster_threshold,
+            0.0,
+            1.0,
+        )
+        self._check_range(
+            "learning_response_stability_threshold",
+            self.learning_response_stability_threshold,
+            0.0,
+            1.0,
+        )
+
 
         self._check_positive("max_graph_capacity", self.max_graph_capacity)
         self._check_positive("decay_interval_hours", self.decay_interval_hours)
         self._check_positive("learning_min_repetitions", self.learning_min_repetitions)
+        self._check_positive("learning_lookback_window", self.learning_lookback_window)
         self._check_positive("stability_medium_threshold", self.stability_medium_threshold)
         self._check_positive("stability_high_threshold", self.stability_high_threshold)
         self._check_positive("max_sequence_depth", self.max_sequence_depth)
@@ -137,6 +175,20 @@ class CogniGraphConfig:
             raise ValueError(
                 f"fallback_similarity ({self.fallback_similarity}) must be less than "
                 f"similarity_threshold ({self.similarity_threshold})"
+            )
+
+        # W3: a learning threshold below the matcher's fallback line lets
+        # the learner cluster inputs the matcher already decided are too
+        # weak to trust — silent over-clustering. Keep them above.
+        if self.learning_input_cluster_threshold < self.fallback_similarity:
+            raise ValueError(
+                f"learning_input_cluster_threshold ({self.learning_input_cluster_threshold}) "
+                f"must be >= fallback_similarity ({self.fallback_similarity})"
+            )
+        if self.learning_dedup_threshold < self.fallback_similarity:
+            raise ValueError(
+                f"learning_dedup_threshold ({self.learning_dedup_threshold}) "
+                f"must be >= fallback_similarity ({self.fallback_similarity})"
             )
 
         if self.confidence_threshold >= 1.0:

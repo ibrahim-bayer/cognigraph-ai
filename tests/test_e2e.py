@@ -35,6 +35,7 @@ from cognigraph.models import (
     Stability,
 )
 from cognigraph.exceptions import LLMPermanentError, LLMRetriableError
+from cognigraph.learner import FlatNodeLearner
 from cognigraph.llm_client import ClaudeLLMProvider
 from cognigraph.matcher import NodeMatcher
 from cognigraph.normalizer import InputNormalizer
@@ -1900,6 +1901,580 @@ class TestReinforcementLifecycleE2E:
 
         # But the interaction was still logged
         assert len(p.get_interactions()) == 1
+
+        idx.close()
+        p.close()
+
+
+# =====================================================================
+# FlatNodeLearner end-to-end scenarios
+# Drive the full pipeline (normalize → embed → matcher → LLM → log →
+# learn) with the real E5 embedder, real FAISS, real SQLite, and the
+# real FlatNodeLearner. Validates the spec acceptance criteria as well
+# as the issue #22 fix on real data.
+# =====================================================================
+
+
+class TestLearnerLifecycleE2E:
+    """Cold start → repeated LLM calls → learner promotes a habit to graph."""
+
+    def test_three_repetitions_create_habit_and_route_graph_direct(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "learner_e2e.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        rl = ReinforcementLogger(store, p, config)
+        learner = FlatNodeLearner(store, idx, embedder, p, config)
+
+        canonical_response = "The capital of France is Paris."
+        rewordings = [
+            "what is the capital of france",
+            "tell me france's capital",
+            "what's the capital city of france",
+        ]
+
+        outcome = None
+        for i, raw in enumerate(rewordings):
+            norm = normalizer.normalize(raw)
+            qv = embedder.embed(norm.normalized)
+            match = matcher.match(qv)
+            log = InteractionLog(
+                timestamp=time.time(),
+                input_text=raw,
+                normalized_text=norm.normalized,
+                route_decision=match.route_decision,
+                matched_node_id=(
+                    match.node.pattern_id if match.node else None
+                ),
+                llm_response=canonical_response,
+                response_text=canonical_response,
+                latency_ms=10.0,
+            )
+            rl.log_and_reinforce(log)
+            outcome = learner.evaluate_for_learning(log)
+
+            if i < 2:
+                assert outcome.created_node is None
+            else:
+                assert outcome.created_node is not None
+                assert outcome.reason == "created"
+                assert outcome.similar_count == 3
+
+        assert outcome is not None
+        learned = outcome.created_node
+        assert learned is not None
+        assert learned.response == canonical_response
+        assert learned.confidence == config.learning_starting_confidence
+        assert set(learned.trigger_patterns) == {
+            normalizer.normalize(r).normalized for r in rewordings
+        }
+
+        # A new probe (semantically similar) finds the learned node
+        probe = embedder.embed(
+            normalizer.normalize("what's france's capital").normalized
+        )
+        probe_match = matcher.match(probe)
+        assert probe_match.node is not None
+        assert probe_match.node.pattern_id == learned.pattern_id
+
+        idx.close()
+        p.close()
+
+
+class TestLearnerIssue22Fix:
+    """Issue #22: distinct intents with similar embeddings but different
+    LLM answers must produce distinct nodes, not collapse onto one."""
+
+    def test_six_distinct_intents_create_six_nodes(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "learner_22.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        rl = ReinforcementLogger(store, p, config)
+        learner = FlatNodeLearner(store, idx, embedder, p, config)
+
+        # Six distinct intents, each repeated 3 times with very minor
+        # rewordings (punctuation, capitalization), each with a stable
+        # but DIFFERENT response. With these tight rewordings every
+        # within-intent pair clears the learning_stability_threshold
+        # (0.9) while cross-intent pairs do not — the response-
+        # divergence dedup then ensures distinct intents yield distinct
+        # nodes (issue #22).
+        intents = [
+            (
+                ["what is my name", "what is my name?", "what is my NAME"],
+                "Ibrahim",
+            ),
+            (
+                [
+                    "what is the weather",
+                    "what is the weather?",
+                    "what is the WEATHER",
+                ],
+                "Sunny, 72°F.",
+            ),
+            (
+                ["what time is it", "what time is it?", "what TIME is it"],
+                "It's 3:15 PM.",
+            ),
+            (
+                ["tell me a joke", "tell me a joke!", "tell me a JOKE"],
+                "Why don't scientists trust atoms? They make up everything.",
+            ),
+            (
+                [
+                    "how do I commit changes",
+                    "how do I commit changes?",
+                    "how do I COMMIT changes",
+                ],
+                "Run: git add -A && git commit -m \"<msg>\".",
+            ),
+            (
+                [
+                    "what is two plus two",
+                    "what is two plus two?",
+                    "what IS two plus two",
+                ],
+                "Four.",
+            ),
+        ]
+
+        for rewordings, response in intents:
+            for raw in rewordings:
+                norm = normalizer.normalize(raw)
+                qv = embedder.embed(norm.normalized)
+                match = matcher.match(qv)
+                log = InteractionLog(
+                    timestamp=time.time(),
+                    input_text=raw,
+                    normalized_text=norm.normalized,
+                    route_decision=match.route_decision,
+                    matched_node_id=(
+                        match.node.pattern_id if match.node else None
+                    ),
+                    llm_response=response,
+                    response_text=response,
+                    latency_ms=10.0,
+                )
+                rl.log_and_reinforce(log)
+                learner.evaluate_for_learning(log)
+
+        # Issue #22 acceptance: distinct intents → distinct nodes
+        assert store.node_count() == 6, (
+            f"expected 6 distinct nodes, got {store.node_count()}: "
+            f"{sorted(n.response[:30] for n in store.all_nodes())}"
+        )
+
+        # Each intent's canonical probe lands on its own node
+        probes_to_response = [
+            ("what is my name?", "Ibrahim"),
+            ("what is the weather", "Sunny, 72°F."),
+            ("what time is it?", "It's 3:15 PM."),
+            (
+                "tell me a joke",
+                "Why don't scientists trust atoms? They make up everything.",
+            ),
+            (
+                "how do I commit changes",
+                "Run: git add -A && git commit -m \"<msg>\".",
+            ),
+            ("what is two plus two?", "Four."),
+        ]
+        seen_node_ids: set[str] = set()
+        for probe, expected_response in probes_to_response:
+            qv = embedder.embed(normalizer.normalize(probe).normalized)
+            m = matcher.match(qv)
+            assert m.node is not None, f"probe {probe!r} produced no match"
+            assert m.node.response == expected_response, (
+                f"probe {probe!r}: matched {m.node.response[:30]!r}, "
+                f"expected {expected_response[:30]!r}"
+            )
+            seen_node_ids.add(m.node.pattern_id)
+        assert len(seen_node_ids) == 6
+
+        idx.close()
+        p.close()
+
+
+class TestLearnerSkipsAlreadyCovered:
+    """When a node already covers a pattern (input + response), don't
+    create a duplicate — even with 3+ similar interactions."""
+
+    def test_existing_node_covering_pattern_blocks_duplicate(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "learner_dedup.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        rl = ReinforcementLogger(store, p, config)
+        learner = FlatNodeLearner(store, idx, embedder, p, config)
+
+        # Pre-seed a node that already covers the pattern
+        existing = _make_learned_node(
+            "existing-name",
+            "what is my name",
+            "Ibrahim",
+            embedder,
+            confidence=0.9,
+        )
+        store.put_node(existing)
+        idx.add(existing.pattern_id, existing.embedding_vector)
+
+        # Three more similar interactions with the SAME response
+        outcome = None
+        for raw in ("tell me my name", "say my name", "what's my name"):
+            norm = normalizer.normalize(raw)
+            log = InteractionLog(
+                timestamp=time.time(),
+                input_text=raw,
+                normalized_text=norm.normalized,
+                route_decision=RouteDecision.LLM_FALLBACK,
+                matched_node_id=existing.pattern_id,
+                llm_response="Ibrahim",
+                response_text="Ibrahim",
+                latency_ms=10.0,
+            )
+            rl.log_and_reinforce(log)
+            outcome = learner.evaluate_for_learning(log)
+
+        # No duplicate created
+        assert store.node_count() == 1
+        assert outcome is not None
+        assert outcome.created_node is None
+        assert outcome.reason == "already_covered_by_existing_node"
+
+        idx.close()
+        p.close()
+
+
+class TestLearnerFailurePathsE2E:
+    """Failure scenarios at the e2e level — the learner declines to
+    crystallize, real components from end to end."""
+
+    def test_insufficient_repetitions_no_node(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """Two LLM interactions for the same intent must not trigger
+        learning — the count gate stops at min_repetitions=3."""
+        db = str(tmp_path / "learner_insufficient.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        rl = ReinforcementLogger(store, p, config)
+        learner = FlatNodeLearner(store, idx, embedder, p, config)
+
+        canonical_response = "It is currently 3:15 PM."
+        rewordings = [
+            "what time is it",
+            "what time is it?",
+        ]
+
+        outcome = None
+        for raw in rewordings:
+            norm = normalizer.normalize(raw)
+            log = InteractionLog(
+                timestamp=time.time(),
+                input_text=raw,
+                normalized_text=norm.normalized,
+                route_decision=RouteDecision.LLM_ONLY,
+                matched_node_id=None,
+                llm_response=canonical_response,
+                response_text=canonical_response,
+                latency_ms=10.0,
+            )
+            rl.log_and_reinforce(log)
+            outcome = learner.evaluate_for_learning(log)
+
+        assert outcome is not None
+        assert outcome.created_node is None
+        assert outcome.reason == "insufficient_repetitions"
+        assert outcome.similar_count == 2
+        assert store.node_count() == 0
+        assert idx.count() == 0
+
+        # Both interactions DID land in persistence — they're available
+        # to a future evaluation when the third arrives.
+        assert len(p.get_interactions()) == 2
+
+        idx.close()
+        p.close()
+
+    def test_unstable_responses_no_node(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        """Three similar inputs with semantically-distinct LLM answers
+        must NOT crystallize a node — the LLM was inconsistent and we
+        can't pick a canonical response."""
+        db = str(tmp_path / "learner_unstable.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        rl = ReinforcementLogger(store, p, config)
+        learner = FlatNodeLearner(store, idx, embedder, p, config)
+
+        # Three near-identical questions → input cluster passes
+        rewordings = [
+            "what is the weather",
+            "what is the weather?",
+            "what is the WEATHER",
+        ]
+        # Three semantically-distinct answers → response stability fails
+        responses = [
+            "Sunny, 72°F.",
+            "Run: git add -A && git commit -m \"<msg>\".",
+            "Why don't scientists trust atoms? They make up everything.",
+        ]
+
+        outcome = None
+        for raw, resp in zip(rewordings, responses):
+            norm = normalizer.normalize(raw)
+            log = InteractionLog(
+                timestamp=time.time(),
+                input_text=raw,
+                normalized_text=norm.normalized,
+                route_decision=RouteDecision.LLM_ONLY,
+                matched_node_id=None,
+                llm_response=resp,
+                response_text=resp,
+                latency_ms=10.0,
+            )
+            rl.log_and_reinforce(log)
+            outcome = learner.evaluate_for_learning(log)
+
+        # Cluster reached 3, but stability check rejected it
+        assert outcome is not None
+        assert outcome.created_node is None
+        assert outcome.reason == "responses_unstable"
+        assert outcome.similar_count == 3
+        assert store.node_count() == 0
+
+        idx.close()
+        p.close()
+
+
+class TestLearnerCrossSession:
+    """Learning history persists across close+reopen — partial
+    repetitions in one session count toward the threshold in the next."""
+
+    def test_two_in_session_1_then_third_creates_node_in_session_2(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "learner_xsession.db")
+        canonical_response = "Paris is the capital of France."
+        rewordings = [
+            "what is the capital of france",
+            "what is the capital of france?",
+            "what is the CAPITAL of france",
+        ]
+
+        # --- Session 1: only 2 of 3 reps happen ---
+        p1 = SQLitePersistence(db)
+        store = p1.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        rl = ReinforcementLogger(store, p1, config)
+        learner = FlatNodeLearner(store, idx, embedder, p1, config)
+
+        for raw in rewordings[:2]:
+            norm = normalizer.normalize(raw)
+            log = InteractionLog(
+                timestamp=time.time(),
+                input_text=raw,
+                normalized_text=norm.normalized,
+                route_decision=RouteDecision.LLM_ONLY,
+                response_text=canonical_response,
+                latency_ms=10.0,
+            )
+            rl.log_and_reinforce(log)
+            outcome = learner.evaluate_for_learning(log)
+            assert outcome.created_node is None  # short of threshold
+
+        assert store.node_count() == 0
+        p1.save_graph(store)
+        idx.close()
+        p1.close()
+
+        # --- Session 2: third rep arrives, node should crystallize
+        # using the persisted history from session 1 ---
+        p2 = SQLitePersistence(db)
+        store2 = p2.load_graph()
+        idx2 = FAISSIndex(dimension=config.embedding_dim)
+        for n in store2.all_nodes():
+            idx2.add(n.pattern_id, n.embedding_vector)
+        matcher2 = NodeMatcher(store2, idx2, config)
+        rl2 = ReinforcementLogger(store2, p2, config)
+        learner2 = FlatNodeLearner(store2, idx2, embedder, p2, config)
+
+        # Confirm session-1 interactions are visible to the new learner
+        assert len(p2.get_interactions()) == 2
+
+        # Third rep in session 2
+        raw = rewordings[2]
+        norm = normalizer.normalize(raw)
+        log = InteractionLog(
+            timestamp=time.time(),
+            input_text=raw,
+            normalized_text=norm.normalized,
+            route_decision=RouteDecision.LLM_ONLY,
+            response_text=canonical_response,
+            latency_ms=10.0,
+        )
+        rl2.log_and_reinforce(log)
+        outcome = learner2.evaluate_for_learning(log)
+
+        # Cross-session history made the cluster
+        assert outcome.created_node is not None
+        assert outcome.reason == "created"
+        assert outcome.similar_count == 3
+        assert store2.node_count() == 1
+        assert idx2.count() == 1
+        assert outcome.created_node.response == canonical_response
+
+        # And the new node is immediately matchable
+        probe_qv = embedder.embed(
+            normalizer.normalize("what's the capital of france?").normalized
+        )
+        match = matcher2.match(probe_qv)
+        assert match.node is not None
+        assert match.node.pattern_id == outcome.created_node.pattern_id
+
+        idx2.close()
+        p2.close()
+
+
+class TestLearnerColdToConfidentLifecycle:
+    """Full cycle: learner creates a node at conf=0.5 (LLM_FALLBACK
+    territory) → reinforcement boosts it through repeated graph hits →
+    eventually GRAPH_DIRECT → no more LLM calls for that intent."""
+
+    def test_learner_create_then_reinforce_to_graph_direct(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "learner_lifecycle.db")
+        p = SQLitePersistence(db)
+        store = p.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        rl = ReinforcementLogger(store, p, config)
+        learner = FlatNodeLearner(store, idx, embedder, p, config)
+
+        canonical_response = "Ibrahim"
+        teaching_phrases = [
+            "what is my name",
+            "what is my name?",
+            "what is my NAME",
+        ]
+
+        # Phase 1: 3 LLM calls teach the habit. Learner crystallizes
+        # on the third with confidence=0.5.
+        learned = None
+        for raw in teaching_phrases:
+            norm = normalizer.normalize(raw)
+            qv = embedder.embed(norm.normalized)
+            match = matcher.match(qv)
+            log = InteractionLog(
+                timestamp=time.time(),
+                input_text=raw,
+                normalized_text=norm.normalized,
+                route_decision=match.route_decision,
+                matched_node_id=(
+                    match.node.pattern_id if match.node else None
+                ),
+                llm_response=canonical_response,
+                response_text=canonical_response,
+                latency_ms=10.0,
+            )
+            rl.log_and_reinforce(log)
+            outcome = learner.evaluate_for_learning(log)
+            if outcome.created_node is not None:
+                learned = outcome.created_node
+
+        assert learned is not None
+        assert learned.confidence == config.learning_starting_confidence
+        assert learned.stability == Stability.LOW
+
+        # Phase 2: At conf=0.5 (below the 0.7 threshold) the matcher
+        # routes LLM_FALLBACK even though the node exists. We're
+        # simulating: the LLM agrees, the reinforcement logger fires
+        # nothing (LLM routes don't reinforce), and we manually nudge
+        # via repeated GRAPH_DIRECT-like reinforcement to model the
+        # post-learner reinforcement loop.
+        first_probe_qv = embedder.embed(
+            normalizer.normalize("what is my name").normalized
+        )
+        first_match = matcher.match(first_probe_qv)
+        assert first_match.node is not None
+        assert first_match.node.pattern_id == learned.pattern_id
+        assert first_match.route_decision == RouteDecision.LLM_FALLBACK
+
+        # Phase 3: Drive the node above the confidence_threshold by
+        # synthesizing GRAPH_DIRECT reinforcement events. This models
+        # what the pipeline does once the node IS confident enough.
+        # We force the route to GRAPH_DIRECT here because in reality
+        # the matcher would do so once conf crosses 0.7 — but we want
+        # to exercise the reinforcement path explicitly.
+        for _ in range(15):
+            rl.log_and_reinforce(
+                InteractionLog(
+                    timestamp=time.time(),
+                    input_text="what is my name",
+                    normalized_text="what is my name",
+                    route_decision=RouteDecision.GRAPH_DIRECT,
+                    matched_node_id=learned.pattern_id,
+                    response_text=canonical_response,
+                    latency_ms=1.0,
+                )
+            )
+
+        # Confidence climbed through the boost loop to >= 0.7
+        reloaded = store.get_node(learned.pattern_id)
+        assert reloaded.confidence >= config.confidence_threshold
+        assert reloaded.reinforcement_count == 15
+
+        # Now matcher routes GRAPH_DIRECT
+        final_qv = embedder.embed(
+            normalizer.normalize("what is my name?").normalized
+        )
+        final_match = matcher.match(final_qv)
+        assert final_match.node.pattern_id == learned.pattern_id
+        assert final_match.route_decision == RouteDecision.GRAPH_DIRECT
+
+        # Stability tier — 15 reinforcements crosses MEDIUM (5) but not HIGH (20)
+        assert reloaded.stability == Stability.MEDIUM
 
         idx.close()
         p.close()

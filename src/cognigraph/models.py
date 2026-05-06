@@ -171,6 +171,20 @@ class InteractionLog:
 
 
 @dataclass
+class LearningOutcome:
+    """Result of FlatNodeLearner.evaluate_for_learning().
+
+    Carries the why behind the decision so callers (the pipeline,
+    diagnostics, smoke runners) can reason about learner behavior
+    without having to re-derive it.
+    """
+
+    created_node: HabitNode | None
+    reason: str
+    similar_count: int = 0
+
+
+@dataclass
 class MatchResult:
     """Outcome of a NodeMatcher.match() call.
 

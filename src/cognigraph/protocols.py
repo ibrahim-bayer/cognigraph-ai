@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from cognigraph.models import ChildLink, HabitNode, InteractionLog, MatchResult
+from cognigraph.models import (
+    ChildLink,
+    HabitNode,
+    InteractionLog,
+    LearningOutcome,
+    MatchResult,
+)
 from cognigraph.types import EmbeddingVector, LLMResponse, NodeId
 
 
@@ -84,6 +90,20 @@ class ReinforcementLoggerProtocol(Protocol):
     def get_node_history(
         self, node_id: NodeId, limit: int | None = 100
     ) -> list[InteractionLog]: ...
+
+
+@runtime_checkable
+class LearnerProtocol(Protocol):
+    """Contract for learner implementations.
+
+    The learner consumes interaction logs (typically from the
+    reinforcement logger) and decides whether the LLM's behavior on
+    this turn is stable enough to deserve a new graph node.
+    """
+
+    def evaluate_for_learning(
+        self, interaction: InteractionLog
+    ) -> LearningOutcome: ...
 
 
 @runtime_checkable
