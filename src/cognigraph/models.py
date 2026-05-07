@@ -80,6 +80,11 @@ class HabitNode:
     decay_score: float = 0.0
     stability: Stability = Stability.LOW
     risk_level: RiskLevel = RiskLevel.LOW
+    # Volatile means the answer can change between calls (e.g., "what
+    # time is it"). The safety boundary always escalates volatile nodes
+    # so the LLM produces a fresh answer instead of serving a stale
+    # cached one.
+    volatile: bool = False
 
     response_form: ResponseForm = ResponseForm.FIXED
     response: str = ""
@@ -101,6 +106,7 @@ class HabitNode:
             "decay_score": self.decay_score,
             "stability": self.stability.value,
             "risk_level": self.risk_level.value,
+            "volatile": self.volatile,
             "response_form": self.response_form.value,
             "response": self.response,
             "children": [c.to_dict() for c in self.children],
@@ -132,6 +138,7 @@ class HabitNode:
                 decay_score=float(data.get("decay_score", 0.0)),
                 stability=cls._safe_enum(Stability, data.get("stability", "low"), Stability.LOW),
                 risk_level=cls._safe_enum(RiskLevel, data.get("risk_level", "low"), RiskLevel.LOW),
+                volatile=bool(data.get("volatile", False)),
                 response_form=cls._safe_enum(ResponseForm, data.get("response_form", "fixed"), ResponseForm.FIXED),
                 response=str(data.get("response", "")),
                 children=[ChildLink.from_dict(c) for c in data.get("children", [])],
@@ -168,6 +175,21 @@ class InteractionLog:
     llm_response: str | None = None
     response_text: str = ""
     latency_ms: float = 0.0
+
+
+@dataclass
+class SafetyDecision:
+    """Outcome of a SafetyBoundary.check() call.
+
+    - `safe=True` means execute as routed.
+    - `safe=False` means do not execute the originally-routed action;
+      use `override_route` instead. `reason` carries a short tag for
+      logging / diagnostics ("high_risk", "ambiguous_match", etc.).
+    """
+
+    safe: bool
+    reason: str | None = None
+    override_route: RouteDecision | None = None
 
 
 @dataclass

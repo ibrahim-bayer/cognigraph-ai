@@ -10,6 +10,7 @@ from cognigraph.models import (
     InteractionLog,
     LearningOutcome,
     MatchResult,
+    SafetyDecision,
 )
 from cognigraph.types import EmbeddingVector, LLMResponse, NodeId
 
@@ -90,6 +91,19 @@ class ReinforcementLoggerProtocol(Protocol):
     def get_node_history(
         self, node_id: NodeId, limit: int | None = 100
     ) -> list[InteractionLog]: ...
+
+
+@runtime_checkable
+class SafetyBoundaryProtocol(Protocol):
+    """Contract for the safety boundary.
+
+    Gates graph routing decisions so the system never confidently
+    serves a wrong, dangerous, ambiguous, or stale answer.
+    """
+
+    def check(
+        self, match_result: MatchResult, input_text: str
+    ) -> SafetyDecision: ...
 
 
 @runtime_checkable

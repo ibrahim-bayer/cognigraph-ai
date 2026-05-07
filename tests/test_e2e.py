@@ -41,6 +41,7 @@ from cognigraph.matcher import NodeMatcher
 from cognigraph.normalizer import InputNormalizer
 from cognigraph.persistence import SQLitePersistence
 from cognigraph.reinforcement import ReinforcementLogger
+from cognigraph.safety import SafetyBoundary
 from cognigraph.vector_index import FAISSIndex
 
 
@@ -2478,3 +2479,255 @@ class TestLearnerColdToConfidentLifecycle:
 
         idx.close()
         p.close()
+
+
+# =====================================================================
+# SafetyBoundary end-to-end scenarios
+# Wires the real matcher + real graph store + real FAISS through the
+# safety boundary on real E5 embeddings to verify the four checks
+# (risk, volatile, ambiguity, blocklist) override correctly.
+# =====================================================================
+
+
+class TestSafetyHighRiskNodeE2E:
+    """A HIGH-risk node, even matched at GRAPH_DIRECT confidence,
+    must be overridden to LLM_FALLBACK by the safety boundary."""
+
+    def test_high_risk_node_matched_then_overridden(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        boundary = SafetyBoundary(config)
+
+        risky = _make_learned_node(
+            "delete-account",
+            "delete my account",
+            "Account deleted permanently.",
+            embedder,
+            confidence=0.95,
+        )
+        risky.risk_level = RiskLevel.HIGH
+        store.put_node(risky)
+        idx.add(risky.pattern_id, risky.embedding_vector)
+
+        raw = "delete my account please"
+        norm = normalizer.normalize(raw)
+        match = matcher.match(embedder.embed(norm.normalized))
+        # Matcher ranks it as a confident graph route...
+        assert match.route_decision == RouteDecision.GRAPH_DIRECT
+        assert match.node.pattern_id == "delete-account"
+
+        # ...but safety vetoes
+        decision = boundary.check(match, input_text=raw)
+        assert decision.safe is False
+        assert decision.reason == "high_risk_node"
+        assert decision.override_route == RouteDecision.LLM_FALLBACK
+
+        idx.close()
+
+
+class TestSafetyVolatileNodeE2E:
+    """A volatile node always escalates so the LLM produces a fresh answer."""
+
+    def test_volatile_time_node_escalates_to_llm(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        boundary = SafetyBoundary(config)
+
+        time_node = _make_learned_node(
+            "tell-time",
+            "what time is it",
+            "Stale answer that shouldn't be served.",
+            embedder,
+            confidence=0.95,
+        )
+        time_node.volatile = True
+        store.put_node(time_node)
+        idx.add(time_node.pattern_id, time_node.embedding_vector)
+
+        match = matcher.match(
+            embedder.embed(normalizer.normalize("what time is it?").normalized)
+        )
+        assert match.route_decision == RouteDecision.GRAPH_DIRECT
+
+        decision = boundary.check(match, input_text="what time is it?")
+        assert decision.safe is False
+        assert decision.reason == "volatile_node"
+        assert decision.override_route == RouteDecision.LLM_FALLBACK
+
+        idx.close()
+
+
+class TestSafetyBlocklistE2E:
+    """Blocklist patterns force the LLM route regardless of graph state."""
+
+    def test_blocklist_match_overrides_graph_direct(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        cfg = CogniGraphConfig(
+            embedding_dim=config.embedding_dim,
+            blocklist_patterns=["password", "social security"],
+        )
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=cfg.embedding_dim)
+        matcher = NodeMatcher(store, idx, cfg)
+        boundary = SafetyBoundary(cfg)
+
+        node = _make_learned_node(
+            "pwd-reset",
+            "how to reset my password",
+            "Click 'Forgot password' on the login screen.",
+            embedder,
+            confidence=0.95,
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        raw = "what is my password"
+        match = matcher.match(
+            embedder.embed(normalizer.normalize(raw).normalized)
+        )
+        assert match.route_decision in (
+            RouteDecision.GRAPH_DIRECT,
+            RouteDecision.GRAPH_COMPOSED,
+        )
+
+        decision = boundary.check(match, input_text=raw)
+        assert decision.safe is False
+        assert decision.reason == "blocklist_match"
+        assert decision.override_route == RouteDecision.LLM_FALLBACK
+        assert boundary.block_counts["blocklist_match"] == 1
+
+        idx.close()
+
+    def test_blocklist_runtime_add_takes_effect_immediately(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        boundary = SafetyBoundary(config)
+
+        node = _make_learned_node(
+            "n", "hello world", "hi", embedder, confidence=0.95
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        match = matcher.match(
+            embedder.embed(normalizer.normalize("hello world").normalized)
+        )
+        assert boundary.check(match, input_text="hello world").safe is True
+
+        boundary.add_to_blocklist("hello")
+        after = boundary.check(match, input_text="hello world")
+        assert after.safe is False
+        assert after.reason == "blocklist_match"
+
+        idx.close()
+
+
+class TestSafetyClearMatchPasses:
+    """Sanity: a low-risk, non-volatile, unambiguous, non-blocklisted
+    match still passes the boundary."""
+
+    def test_safe_path_executes(
+        self,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        store = InMemoryGraphStore()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        matcher = NodeMatcher(store, idx, config)
+        boundary = SafetyBoundary(config)
+
+        node = _make_learned_node(
+            "name", "what is my name", "Ibrahim", embedder, confidence=0.95
+        )
+        store.put_node(node)
+        idx.add(node.pattern_id, node.embedding_vector)
+
+        unrelated = _make_learned_node(
+            "math", "what is two plus two", "Four.", embedder, confidence=0.5
+        )
+        store.put_node(unrelated)
+        idx.add(unrelated.pattern_id, unrelated.embedding_vector)
+
+        raw = "tell me my name"
+        match = matcher.match(
+            embedder.embed(normalizer.normalize(raw).normalized)
+        )
+        assert match.node.pattern_id == "name"
+        assert match.ambiguous is False
+
+        decision = boundary.check(match, input_text=raw)
+        assert decision.safe is True
+        assert decision.reason is None
+        assert decision.override_route is None
+        assert sum(boundary.block_counts.values()) == 0
+
+        idx.close()
+
+
+class TestSafetyVolatileSurvivesPersistence:
+    """B1 in real conditions: the volatile flag must survive the full
+    SQLite save+reload cycle, otherwise the safety check silently
+    becomes a no-op after process restart."""
+
+    def test_volatile_node_volatile_after_reload(
+        self,
+        tmp_path: Path,
+        normalizer: InputNormalizer,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        db = str(tmp_path / "safety_volatile.db")
+
+        p1 = SQLitePersistence(db)
+        store = p1.load_graph()
+        node = _make_learned_node(
+            "time", "what time is it", "stale", embedder, confidence=0.95
+        )
+        node.volatile = True
+        store.put_node(node)
+        p1.save_graph(store)
+        p1.close()
+
+        p2 = SQLitePersistence(db)
+        store2 = p2.load_graph()
+        idx = FAISSIndex(dimension=config.embedding_dim)
+        for n in store2.all_nodes():
+            idx.add(n.pattern_id, n.embedding_vector)
+        matcher = NodeMatcher(store2, idx, config)
+        boundary = SafetyBoundary(config)
+
+        reloaded = store2.get_node("time")
+        assert reloaded.volatile is True
+
+        match = matcher.match(
+            embedder.embed(normalizer.normalize("what time is it").normalized)
+        )
+        decision = boundary.check(match, input_text="what time is it")
+        assert decision.safe is False
+        assert decision.reason == "volatile_node"
+
+        idx.close()
+        p2.close()

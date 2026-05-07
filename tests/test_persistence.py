@@ -156,6 +156,37 @@ class TestGraphRoundTrip:
         assert restored.risk_level == RiskLevel.MEDIUM
         assert restored.response_form == ResponseForm.TEMPLATE
 
+    def test_volatile_field_round_trips_through_sqlite(
+        self, persistence: SQLitePersistence
+    ) -> None:
+        """B1 architect fix: the safety boundary's volatility check is a
+        no-op if `volatile` doesn't survive serialization. Pin it."""
+        store = InMemoryGraphStore()
+        # One volatile, one non-volatile
+        store.put_node(
+            HabitNode(
+                pattern_id="vol",
+                trigger_patterns=["what time is it"],
+                embedding_vector=[0.1, 0.2, 0.3, 0.4],
+                volatile=True,
+                response="3:15 PM",
+            )
+        )
+        store.put_node(
+            HabitNode(
+                pattern_id="static",
+                trigger_patterns=["what's my name"],
+                embedding_vector=[0.5, 0.5, 0.5, 0.5],
+                volatile=False,
+                response="Ibrahim",
+            )
+        )
+        persistence.save_graph(store)
+
+        loaded = persistence.load_graph()
+        assert loaded.get_node("vol").volatile is True
+        assert loaded.get_node("static").volatile is False
+
     def test_save_multiple_nodes(self, persistence: SQLitePersistence) -> None:
         store = InMemoryGraphStore()
         for i in range(10):
