@@ -178,6 +178,25 @@ class InteractionLog:
 
 
 @dataclass
+class PipelineResult:
+    """Outcome of a single CogniGraphPipeline.process() turn.
+
+    Carries the user-visible response plus diagnostic fields for
+    logging and the REPL/CLI to surface routing context.
+    """
+
+    response: str
+    route: RouteDecision
+    matched_node_id: str | None
+    latency_ms: float
+    confidence: float
+    # Optional diagnostic — populated when safety rerouted the matcher,
+    # or carries the learner's outcome for LLM turns. None on a clean
+    # graph hit.
+    reason: str | None = None
+
+
+@dataclass
 class SafetyDecision:
     """Outcome of a SafetyBoundary.check() call.
 

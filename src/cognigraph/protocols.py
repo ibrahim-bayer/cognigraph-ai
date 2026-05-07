@@ -10,6 +10,7 @@ from cognigraph.models import (
     InteractionLog,
     LearningOutcome,
     MatchResult,
+    PipelineResult,
     SafetyDecision,
 )
 from cognigraph.types import EmbeddingVector, LLMResponse, NodeId
@@ -91,6 +92,15 @@ class ReinforcementLoggerProtocol(Protocol):
     def get_node_history(
         self, node_id: NodeId, limit: int | None = 100
     ) -> list[InteractionLog]: ...
+
+
+@runtime_checkable
+class PipelineProtocol(Protocol):
+    """Contract for the top-level orchestrator."""
+
+    def process(self, raw_input: str) -> PipelineResult: ...
+
+    def get_stats(self) -> dict: ...
 
 
 @runtime_checkable

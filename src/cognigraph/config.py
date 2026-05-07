@@ -90,6 +90,12 @@ class CogniGraphConfig:
     llm_max_tokens: int = 1024
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 2
+    # System prompt threaded into every LLM_FALLBACK / LLM_ONLY call by
+    # the pipeline. Override via config to constrain tone/length/format.
+    pipeline_system_prompt: str = (
+        "You are the cognitive fallback for a learned graph agent. "
+        "Answer concisely in 1-2 sentences."
+    )
 
     # --- Safety ---
     ambiguity_gap: float = 0.05

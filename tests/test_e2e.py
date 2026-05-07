@@ -40,8 +40,10 @@ from cognigraph.llm_client import ClaudeLLMProvider
 from cognigraph.matcher import NodeMatcher
 from cognigraph.normalizer import InputNormalizer
 from cognigraph.persistence import SQLitePersistence
+from cognigraph.pipeline import CogniGraphPipeline
 from cognigraph.reinforcement import ReinforcementLogger
 from cognigraph.safety import SafetyBoundary
+from cognigraph.types import LLMResponse
 from cognigraph.vector_index import FAISSIndex
 
 
@@ -2731,3 +2733,340 @@ class TestSafetyVolatileSurvivesPersistence:
 
         idx.close()
         p2.close()
+
+
+# =====================================================================
+# CogniGraphPipeline end-to-end scenarios
+# Real E5 + real FAISS + real SQLite + the full pipeline orchestrator.
+# LLM is stubbed via an injected fake-anthropic client (lookup-table)
+# so tests stay deterministic without burning API tokens, but the rest
+# of the system runs production code.
+# =====================================================================
+
+
+class _PipelineFakeUsage:
+    def __init__(self) -> None:
+        self.input_tokens = 10
+        self.output_tokens = 20
+
+
+class _PipelineFakeTextBlock:
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _PipelineFakeResponse:
+    def __init__(self, text: str) -> None:
+        self.content = [_PipelineFakeTextBlock(text)]
+        self.model = "claude-fake"
+        self.usage = _PipelineFakeUsage()
+
+
+class _PipelineFakeMessages:
+    """Lookup-table fake — answers from a substring map."""
+
+    def __init__(self, table: dict[str, str], default: str) -> None:
+        self._table = table
+        self._default = default
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        last_user = next(
+            (
+                m["content"]
+                for m in reversed(kwargs.get("messages", []))
+                if m.get("role") == "user"
+            ),
+            "",
+        ).lower()
+        for needle, response in self._table.items():
+            if needle.lower() in last_user:
+                return _PipelineFakeResponse(response)
+        return _PipelineFakeResponse(self._default)
+
+
+class _PipelineFakeAnthropic:
+    def __init__(self, table: dict[str, str], default: str = "(unknown)") -> None:
+        self.messages = _PipelineFakeMessages(table, default)
+
+
+def _build_pipeline(
+    tmp_path: Path,
+    embedder: EmbeddingService,
+    config: CogniGraphConfig,
+    *,
+    answers: dict[str, str] | None = None,
+    db_name: str = "pipeline_e2e.db",
+    blocklist: list[str] | None = None,
+) -> tuple[CogniGraphPipeline, SQLitePersistence, ClaudeLLMProvider]:
+    """Construct a real pipeline with a fake-anthropic-backed LLM."""
+    cfg = config
+    if blocklist is not None:
+        cfg = CogniGraphConfig(
+            embedding_dim=config.embedding_dim,
+            faiss_search_k=config.faiss_search_k,
+            blocklist_patterns=blocklist,
+        )
+    fake_client = _PipelineFakeAnthropic(answers or {})
+    llm = ClaudeLLMProvider(
+        api_key="fake", model="claude-fake", config=cfg, client=fake_client
+    )
+    persistence = SQLitePersistence(str(tmp_path / db_name))
+    pipeline = CogniGraphPipeline(
+        config=cfg, embedder=embedder, persistence=persistence, llm=llm
+    )
+    return pipeline, persistence, llm
+
+
+class TestPipelineColdToConfidentE2E:
+    """Cold start, ask the same question 3 times, learner crystallizes
+    a node, then the matcher routes around the LLM on the 4th call."""
+
+    def test_three_repetitions_then_graph_route(
+        self,
+        tmp_path: Path,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        pipeline, persistence, llm = _build_pipeline(
+            tmp_path, embedder, config,
+            answers={"capital of france": "Paris is the capital of France."},
+        )
+
+        try:
+            rewordings = [
+                "what is the capital of france",
+                "what is the capital of france?",
+                "what is the CAPITAL of france",
+            ]
+
+            results = [pipeline.process(r) for r in rewordings]
+            for r in results:
+                assert r.route == RouteDecision.LLM_ONLY
+
+            assert pipeline._graph_store.node_count() == 1
+
+            # The next probe with similar text matches the new node.
+            # learning_starting_confidence=0.5 < confidence_threshold=0.7,
+            # so the matcher routes LLM_FALLBACK rather than GRAPH_DIRECT.
+            probe = pipeline.process("what is the capital of france?!")
+            assert probe.route == RouteDecision.LLM_FALLBACK
+            assert probe.matched_node_id is not None
+
+            stats = pipeline.get_stats()
+            assert stats["total_requests"] == 4
+            assert stats["llm_calls"] == 4
+            assert stats["graph_hits"] == 0
+            assert stats["node_count"] == 1
+        finally:
+            llm.close()
+            persistence.close()
+
+
+class TestPipelineCrossSession:
+    """State persists across pipeline restart: graph nodes, FAISS
+    vectors, and interaction history all reload."""
+
+    def test_graph_persists_across_pipeline_restart(
+        self,
+        tmp_path: Path,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        pipeline1, p1, llm1 = _build_pipeline(
+            tmp_path, embedder, config,
+            answers={"name": "Ibrahim"},
+            db_name="cross_session.db",
+        )
+        try:
+            for r in (
+                "what is my name",
+                "what is my name?",
+                "what is my NAME",
+                "what is my name?!",
+                "what is my Name",
+                "what is my name?!?",
+                "what's my name",
+            ):
+                pipeline1.process(r)
+            # The pipeline doesn't auto-persist the graph (that's #020
+            # startup/shutdown's job). Save explicitly here — this is
+            # what the future shutdown hook will do.
+            p1.save_graph(pipeline1._graph_store)
+            pipeline1._faiss.save(str(tmp_path / "cross_session.faiss"))
+            session1_node_count = pipeline1._graph_store.node_count()
+            session1_log_count = len(p1.get_interactions())
+            assert session1_node_count >= 1
+        finally:
+            llm1.close()
+            p1.close()
+
+        # Reopen — the pipeline default-builds an empty graph so we
+        # explicitly inject the loaded ones (this is what #020 will own).
+        p2 = SQLitePersistence(str(tmp_path / "cross_session.db"))
+        store2 = p2.load_graph()
+        idx2 = FAISSIndex(dimension=config.embedding_dim)
+        idx2.load(str(tmp_path / "cross_session.faiss"))
+
+        fake_client = _PipelineFakeAnthropic({"name": "Ibrahim"})
+        llm2 = ClaudeLLMProvider(
+            api_key="fake", model="claude-fake", config=config, client=fake_client
+        )
+        pipeline2 = CogniGraphPipeline(
+            config=config,
+            embedder=embedder,
+            graph_store=store2,
+            vector_index=idx2,
+            persistence=p2,
+            llm=llm2,
+        )
+
+        try:
+            assert pipeline2._graph_store.node_count() == session1_node_count
+            assert len(p2.get_interactions()) == session1_log_count
+
+            result = pipeline2.process("what is my name?")
+            assert result.matched_node_id is not None
+            assert result.route in (
+                RouteDecision.LLM_FALLBACK,
+                RouteDecision.GRAPH_DIRECT,
+            )
+        finally:
+            llm2.close()
+            idx2.close()
+            p2.close()
+
+
+class TestPipelineSafetyIntegration:
+    """Safety boundary intercepts a confident graph match through the
+    full pipeline orchestration."""
+
+    def test_high_risk_node_routes_around_graph(
+        self,
+        tmp_path: Path,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        pipeline, persistence, llm = _build_pipeline(
+            tmp_path, embedder, config,
+            answers={"delete": "Are you sure? This is irreversible."},
+            db_name="safety_e2e.db",
+        )
+        try:
+            risky = _make_learned_node(
+                "delete-account",
+                "delete my account",
+                "Account deleted permanently.",
+                embedder,
+                confidence=0.95,
+            )
+            risky.risk_level = RiskLevel.HIGH
+            pipeline._graph_store.put_node(risky)
+            pipeline._faiss.add(risky.pattern_id, risky.embedding_vector)
+
+            result = pipeline.process("delete my account")
+
+            assert result.route == RouteDecision.LLM_FALLBACK
+            assert result.matched_node_id == "delete-account"
+            assert result.reason == "high_risk_node"
+            assert "Are you sure" in result.response
+
+            # The risky node was NOT reinforced
+            after = pipeline._graph_store.get_node("delete-account")
+            assert after.reinforcement_count == 0
+
+            stats = pipeline.get_stats()
+            assert stats["safety_overrides"] == 1
+            assert stats["graph_hits"] == 0
+            assert stats["llm_calls"] == 1
+        finally:
+            llm.close()
+            persistence.close()
+
+    def test_blocklist_intercepts_at_pipeline(
+        self,
+        tmp_path: Path,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        pipeline, persistence, llm = _build_pipeline(
+            tmp_path, embedder, config,
+            answers={"password": "Use the password reset link."},
+            db_name="blocklist_e2e.db",
+            blocklist=["password"],
+        )
+        try:
+            result = pipeline.process("how do I reset my password")
+            assert result.route in (
+                RouteDecision.LLM_FALLBACK,
+                RouteDecision.LLM_ONLY,
+            )
+            assert result.reason == "blocklist_match"
+
+            stats = pipeline.get_stats()
+            assert stats["safety_overrides"] == 1
+        finally:
+            llm.close()
+            persistence.close()
+
+
+class TestPipelineMixedTraffic:
+    """Realistic session with seeded node + alternating known/novel
+    queries — routing and stats track reality."""
+
+    def test_alternating_known_and_novel(
+        self,
+        tmp_path: Path,
+        embedder: EmbeddingService,
+        config: CogniGraphConfig,
+    ) -> None:
+        pipeline, persistence, llm = _build_pipeline(
+            tmp_path, embedder, config,
+            answers={
+                "novel-1": "(LLM-1)",
+                "novel-2": "(LLM-2)",
+            },
+            db_name="mixed.db",
+        )
+        try:
+            known = _make_learned_node(
+                "name",
+                "what is my name",
+                "Ibrahim",
+                embedder,
+                confidence=0.95,
+            )
+            pipeline._graph_store.put_node(known)
+            pipeline._faiss.add(known.pattern_id, known.embedding_vector)
+
+            results = [
+                pipeline.process("what is my name"),
+                pipeline.process("tell me about novel-1 things"),
+                pipeline.process("what is my name?"),
+                pipeline.process("totally different novel-2 query"),
+                pipeline.process("what is my NAME"),
+            ]
+
+            graph_routes = [
+                r for r in results if r.route == RouteDecision.GRAPH_DIRECT
+            ]
+            llm_routes = [
+                r for r in results if r.route in (
+                    RouteDecision.LLM_ONLY, RouteDecision.LLM_FALLBACK
+                )
+            ]
+            assert len(graph_routes) == 3
+            assert len(llm_routes) == 2
+
+            stats = pipeline.get_stats()
+            assert stats["total_requests"] == 5
+            assert stats["graph_hits"] == 3
+            assert stats["llm_calls"] == 2
+            assert stats["graph_hit_rate"] == pytest.approx(0.6)
+
+            assert len(persistence.get_interactions()) == 5
+        finally:
+            llm.close()
+            persistence.close()
