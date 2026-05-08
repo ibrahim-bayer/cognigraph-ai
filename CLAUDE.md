@@ -1,23 +1,35 @@
-# Cognigraph-AI: The Habit Layer for LLM Agents
+# Cognigraph: Runtime Cognitive Coordination Layer
+
+## Positioning
+
+**Cognigraph is a runtime cognitive coordination layer that transforms AI reasoning into adaptive enterprise execution.**
+
+Unpacked:
+
+- **Runtime** — real-time decisions on every request. Not offline training, not batch indexing.
+- **Cognitive coordination** — orchestrates across four concerns the customer can't safely conflate: routing (graph vs LLM), safety (risk / volatility / ambiguity / blocklist), reinforcement (which habits strengthen), and learning (when novel patterns crystallize).
+- **AI reasoning** — vendor-neutral input. Claude, GPT, Gemini, local models — anything implementing `LLMProvider`.
+- **Adaptive** — learns from experience, reinforces what works, decays what doesn't, evolves with the workload over the lifetime of the deployment.
+- **Enterprise execution** — operationally deployable: auditable to the row, safety-gated by design, local-first storage, multi-tenant-capable, protocol-driven for swap-out.
 
 ## Strategic Direction
 
-**Cognigraph-AI is not building an MVP product. It is building the reference implementation of an architectural pattern with the explicit ambition of becoming foundational AI infrastructure — the habit layer / procedural memory layer for LLM agents (basal ganglia for AI).**
+**Cognigraph is not building an MVP product. It is building the reference implementation of an architectural pattern with the ambition of becoming foundational AI infrastructure — the coordination layer between AI reasoning and enterprise action.**
 
-- **Pattern:** graph-first, LLM-fallback with crystallized habits.
-- **Position:** procedural memory layer that sits between an input and any LLM. Head goes to the graph at sub-millisecond latency / zero token cost. Tail goes to the LLM. Both auditable.
+- **Pattern (the mechanism):** graph-first, LLM-fallback with crystallized habits. Head of the query distribution executes from a learned graph at sub-millisecond latency / zero token cost. Tail goes to the LLM. Both auditable.
+- **Position (the wedge):** the runtime layer between an enterprise's LLM provider and the system that needs to act on the LLM's output. Drop it in front of any LLM-using product to make the head deterministic, cheap, and safe.
 - **Distribution:** open-source GitHub repo, vendor-neutral via Protocol-driven swap-points. Long-horizon target is the named-pattern + reference-implementation outcome.
 - **Horizon:** 18-36 months to credible standard-bearer. 1-2 months to a usable command-line system (#20 lifecycle + #21 REPL).
-- **Pitch frame:** future-state / investment-grade direction, NOT a deploy-today product. When pitching to non-engineers, lead with the market shift (LLM cost is permanent, audit is rising, local inference is feasible) and the pattern, not feature lists.
+- **Pitch frame:** future-state / investment-grade direction, NOT a deploy-today product. When pitching to enterprise / non-engineering audiences, lead with the coordination-layer framing (turn AI reasoning into adaptive execution) and the market shift (LLM cost is permanent, audit pressure is rising, local inference is feasible). Lead with the pattern, not feature lists.
 
 ### What this means for code-level decisions
 
-- **Build for an external developer audience**, not just internal use. The library is the demo, not the product.
+- **Build for an external developer audience**, not just internal use. The library is the demo of the pattern, not the product itself.
 - **Code style: portable invariants over Python idioms.** Protocols are designed to be portable to TypeScript / Go / Rust later. Avoid Python-specific abstractions in the public contract surface.
 - **Tests are also a contract document for re-implementers.** Behavior pinned by tests is part of the future spec.
 - **ITDs are durable records.** Continue the ITD discipline — they become the spec when the pattern formalizes.
-- **Architectural risk has been retired.** Eleven critical-priority components are shipped. The remaining engineering work is more about adoption infrastructure (benchmarks, integrations, multi-tenant, observability) than core architecture.
-- **Naming:** "Cognigraph-AI" is the project name; **"graph-first, LLM-fallback with crystallized habits"** is the pattern name worth owning. The pattern outlives this specific implementation.
+- **Architectural risk has been retired.** Eleven critical-priority components shipped, 527 tests. The remaining engineering work is adoption infrastructure (benchmarks, integrations, multi-tenant, observability), not core architecture.
+- **Naming:** "Cognigraph" is the project name; **"runtime cognitive coordination layer"** is the positioning; **"graph-first, LLM-fallback with crystallized habits"** is the pattern name worth owning. The pattern outlives this specific implementation.
 - **Priorities that gate adoption-as-standard** (treat as critical-priority once #20/#21 land):
   - Benchmarks vs alternatives (GPTCache, raw LLM, RAG) — every architect review has flagged the missing numbers
   - Adapter / integration work (LangChain, LlamaIndex, OpenAI Agents SDK)
@@ -27,10 +39,15 @@
 
 ### What this is NOT
 
-- Not an agent framework (we sit alongside one)
-- Not RAG (we're complementary — RAG grounds in documents; we eliminate calls on the head)
-- Not a fine-tune (no training loop; habits are inspectable text in a database)
+- Not an agent framework (we sit between the framework and the LLM)
+- Not RAG (we're complementary — RAG grounds the LLM in documents; we eliminate the LLM call on the head of the distribution)
+- Not a fine-tune (no training loop; habits are inspectable text in a database, retrainable in seconds)
 - Not a model (vendor-neutral via `LLMProvider` protocol)
+- Not a cache (caches are passive; we coordinate — we route, gate, reinforce, and learn)
+
+### Intellectual lineage (internal — not the public pitch)
+
+The mechanism mirrors basal-ganglia / striatal procedural memory in neuroscience: routine decisions execute through a learned, gated, decay-pruned circuit; novel decisions escalate to cortex. System 1 / System 2 (Kahneman) is the same idea at a different level of description. These framings are useful for engineering reasoning; they are NOT the positioning we lead with externally — enterprise audiences relate to "coordination layer," not to "basal ganglia."
 
 ## Project Vision
 

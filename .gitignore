@@ -27,3 +27,6 @@ scratch/*.db-wal
 scratch/*.db-shm
 scratch/*.faiss
 scratch/*.faiss.ids.json
+
+# Private go-to-market drafts (LinkedIn, YC, AI Grant, DMs)
+scratch/marketing/
