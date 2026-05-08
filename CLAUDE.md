@@ -1,4 +1,36 @@
-# LLM-Habit: Human-Like Cognitive Agent
+# Cognigraph-AI: The Habit Layer for LLM Agents
+
+## Strategic Direction
+
+**Cognigraph-AI is not building an MVP product. It is building the reference implementation of an architectural pattern with the explicit ambition of becoming foundational AI infrastructure — the habit layer / procedural memory layer for LLM agents (basal ganglia for AI).**
+
+- **Pattern:** graph-first, LLM-fallback with crystallized habits.
+- **Position:** procedural memory layer that sits between an input and any LLM. Head goes to the graph at sub-millisecond latency / zero token cost. Tail goes to the LLM. Both auditable.
+- **Distribution:** open-source GitHub repo, vendor-neutral via Protocol-driven swap-points. Long-horizon target is the named-pattern + reference-implementation outcome.
+- **Horizon:** 18-36 months to credible standard-bearer. 1-2 months to a usable command-line system (#20 lifecycle + #21 REPL).
+- **Pitch frame:** future-state / investment-grade direction, NOT a deploy-today product. When pitching to non-engineers, lead with the market shift (LLM cost is permanent, audit is rising, local inference is feasible) and the pattern, not feature lists.
+
+### What this means for code-level decisions
+
+- **Build for an external developer audience**, not just internal use. The library is the demo, not the product.
+- **Code style: portable invariants over Python idioms.** Protocols are designed to be portable to TypeScript / Go / Rust later. Avoid Python-specific abstractions in the public contract surface.
+- **Tests are also a contract document for re-implementers.** Behavior pinned by tests is part of the future spec.
+- **ITDs are durable records.** Continue the ITD discipline — they become the spec when the pattern formalizes.
+- **Architectural risk has been retired.** Eleven critical-priority components are shipped. The remaining engineering work is more about adoption infrastructure (benchmarks, integrations, multi-tenant, observability) than core architecture.
+- **Naming:** "Cognigraph-AI" is the project name; **"graph-first, LLM-fallback with crystallized habits"** is the pattern name worth owning. The pattern outlives this specific implementation.
+- **Priorities that gate adoption-as-standard** (treat as critical-priority once #20/#21 land):
+  - Benchmarks vs alternatives (GPTCache, raw LLM, RAG) — every architect review has flagged the missing numbers
+  - Adapter / integration work (LangChain, LlamaIndex, OpenAI Agents SDK)
+  - Multi-tenant isolation (enterprise plausibility)
+  - Observability / metric-sink hooks (#28 — ops credibility)
+  - Eventual TypeScript port — design Protocols with that in mind now
+
+### What this is NOT
+
+- Not an agent framework (we sit alongside one)
+- Not RAG (we're complementary — RAG grounds in documents; we eliminate calls on the head)
+- Not a fine-tune (no training loop; habits are inspectable text in a database)
+- Not a model (vendor-neutral via `LLMProvider` protocol)
 
 ## Project Vision
 
