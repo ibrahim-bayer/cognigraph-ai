@@ -155,16 +155,16 @@ Weak fits: highly novel / freeform tasks, single-shot interactions, fast-changin
 
 | Shipped | Next |
 |---|---|
-| Embedding service | Lifecycle (#20 ✅) |
-| Graph store | REPL / CLI (#21) |
-| SQLite persistence + audit log | **Deploy-mode** (LLM-less pipeline) |
-| FAISS vector index | **Bulk training** (CSV → graph) |
-| LLM client (Claude) | Benchmarks vs raw LLM, GPTCache |
-| Matcher (4-route decision) | Integration adapters (LangChain, LlamaIndex) |
-| Reinforcement logger | Multi-tenant isolation |
-| Learner (3-rep crystallization) | Composed skill execution (#11) |
-| Safety boundary (4-layer) | Decay / eviction (#17) |
-| Pipeline orchestrator | Observability hooks (#28) |
+| Embedding service | REPL / CLI (#21) |
+| Graph store | Benchmarks vs raw LLM, GPTCache |
+| SQLite persistence + audit log | Integration adapters (LangChain, LlamaIndex) |
+| FAISS vector index | Multi-tenant isolation |
+| LLM client (Claude) | Composed skill execution (#11) |
+| Matcher (4-route decision) | Decay / eviction (#17) |
+| Reinforcement logger | Observability hooks (#28) |
+| Learner (3-rep crystallization) | |
+| Safety boundary (4-layer) | |
+| Pipeline orchestrator | |
 | Application lifecycle | |
 
 **548 tests** unit + e2e using real E5 embeddings, real FAISS, real SQLite. Architect-reviewed at every step; all BLOCKs and important WARNs resolved inline.

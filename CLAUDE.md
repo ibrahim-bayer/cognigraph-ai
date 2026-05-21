@@ -32,11 +32,11 @@ This is not an MVP product. It is the reference implementation of a category: **
 
 ## State
 
-11 critical-priority components shipped. 548 tests passing. Architectural risk is retired. See [README.md](README.md) for the public framing and [docs/architecture.md](docs/architecture.md) for the deep reference.
+12 critical-priority components shipped (through #20 lifecycle). 548 tests passing. Architectural risk is retired. See [README.md](README.md) for the public framing and [docs/architecture.md](docs/architecture.md) for the deep reference.
 
-Remaining work is adoption infrastructure (benchmarks, integrations, multi-tenant, **deploy-mode without LLM**, observability hooks) and lifecycle/REPL polish — not core architecture.
+Remaining near-term work: REPL (#21) for a usable command-line system, then adoption infrastructure (benchmarks vs raw LLM / GPTCache, integration adapters, multi-tenant isolation, observability hooks #28).
 
-The highest-leverage feature gap is **deploy-mode**: a `NoOpLLM` + LLM-less pipeline construction, plus a bulk-training CLI. That's what makes "train with AI, deploy without it" real instead of aspirational.
+"Train with AI, deploy without it" is the long-term direction the architecture enables, not a current build target. Don't plan deploy-mode features unless explicitly prioritized; do preserve the invariant that nothing in the system requires the LLM at runtime when the graph could handle it.
 
 ---
 
