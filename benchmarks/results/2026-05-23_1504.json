@@ -1,0 +1,360 @@
+{
+  "dataset_source": "synthetic-fallback",
+  "n_intents": 8,
+  "warmup_size": 10,
+  "measurement_size": 30,
+  "head_intent_share": 0.9333333333333333,
+  "model": "mock",
+  "started_at": 1779548649.16401,
+  "finished_at": 1779548649.5145779,
+  "summaries": [
+    {
+      "name": "mock_llm",
+      "n_queries": 30,
+      "n_errors": 0,
+      "deflection_rate": 0.0,
+      "total_input_tokens": 1524,
+      "total_output_tokens": 884,
+      "total_cost_usd": 0.017832,
+      "p50_latency_ms": 11.229833002289524,
+      "p95_latency_ms": 18.10103344905656,
+      "p99_latency_ms": 18.484120321554656,
+      "mean_latency_ms": 11.641558333455274,
+      "route_counts": {
+        "llm_call": 30
+      }
+    }
+  ],
+  "records": [
+    {
+      "system_name": "mock_llm",
+      "query": "I need to talk to someone",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 53,
+      "output_tokens": 21,
+      "latency_ms": 14.054250001208857,
+      "cost_usd": 0.000474
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "I want to cancel an order",
+      "expected_intent": "cancel_order",
+      "route": "llm_call",
+      "response": "Cancel from /orders/<id> within 1 hour of placement.",
+      "input_tokens": 56,
+      "output_tokens": 35,
+      "latency_ms": 9.515666999504901,
+      "cost_usd": 0.0006929999999999999
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "speak to a representative",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 49,
+      "output_tokens": 35,
+      "latency_ms": 9.225083002093015,
+      "cost_usd": 0.000672
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "how do I reach support",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Reach support at /help or live chat.",
+      "input_tokens": 46,
+      "output_tokens": 36,
+      "latency_ms": 10.757208001450635,
+      "cost_usd": 0.000678
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "speak to a representative",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 44,
+      "output_tokens": 23,
+      "latency_ms": 8.0247080004483,
+      "cost_usd": 0.000477
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "live chat",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 48,
+      "output_tokens": 37,
+      "latency_ms": 14.001666997501161,
+      "cost_usd": 0.000699
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "how do I reach support",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Reach support at /help or live chat.",
+      "input_tokens": 59,
+      "output_tokens": 24,
+      "latency_ms": 18.548875003034482,
+      "cost_usd": 0.000537
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "delivery tracking",
+      "expected_intent": "order_tracking",
+      "route": "llm_call",
+      "response": "Track your order at /orders/<id>/tracking.",
+      "input_tokens": 42,
+      "output_tokens": 30,
+      "latency_ms": 10.153458002605475,
+      "cost_usd": 0.000576
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "refund timing question",
+      "expected_intent": "refund_status",
+      "route": "llm_call",
+      "response": "Refunds process in 5-7 business days.",
+      "input_tokens": 43,
+      "output_tokens": 31,
+      "latency_ms": 12.174707997473888,
+      "cost_usd": 0.000594
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "delete my account",
+      "expected_intent": "account_delete",
+      "route": "llm_call",
+      "response": "Submit account-deletion request from /account/settings/delete.",
+      "input_tokens": 59,
+      "output_tokens": 40,
+      "latency_ms": 11.702458003128413,
+      "cost_usd": 0.000777
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "my payment failed",
+      "expected_intent": "payment_issue",
+      "route": "llm_call",
+      "response": "Try a different payment method.",
+      "input_tokens": 57,
+      "output_tokens": 35,
+      "latency_ms": 17.70316599868238,
+      "cost_usd": 0.000696
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "close account",
+      "expected_intent": "account_delete",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 56,
+      "output_tokens": 28,
+      "latency_ms": 11.809249997895677,
+      "cost_usd": 0.000588
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "how do I reach support",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Reach support at /help or live chat.",
+      "input_tokens": 57,
+      "output_tokens": 20,
+      "latency_ms": 7.100167000317015,
+      "cost_usd": 0.00047100000000000006
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "I want to leave",
+      "expected_intent": "account_delete",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 52,
+      "output_tokens": 40,
+      "latency_ms": 6.738249998306856,
+      "cost_usd": 0.000756
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "how do I reach support",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Reach support at /help or live chat.",
+      "input_tokens": 55,
+      "output_tokens": 30,
+      "latency_ms": 5.332917000487214,
+      "cost_usd": 0.000615
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "live chat",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 50,
+      "output_tokens": 22,
+      "latency_ms": 7.674167001823662,
+      "cost_usd": 0.00048
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "order shipping status",
+      "expected_intent": "order_tracking",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 58,
+      "output_tokens": 27,
+      "latency_ms": 8.071416999882786,
+      "cost_usd": 0.000579
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "I need to talk to someone",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 44,
+      "output_tokens": 37,
+      "latency_ms": 9.096958001464373,
+      "cost_usd": 0.0006869999999999999
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "I want to leave",
+      "expected_intent": "account_delete",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 42,
+      "output_tokens": 30,
+      "latency_ms": 10.526792000746354,
+      "cost_usd": 0.000576
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "live chat",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 55,
+      "output_tokens": 23,
+      "latency_ms": 17.22479200179805,
+      "cost_usd": 0.00051
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "human agent please",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 49,
+      "output_tokens": 23,
+      "latency_ms": 10.049458000139566,
+      "cost_usd": 0.000492
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "deactivate account",
+      "expected_intent": "account_delete",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 57,
+      "output_tokens": 26,
+      "latency_ms": 13.129582999681588,
+      "cost_usd": 0.000561
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "how do I reach support",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Reach support at /help or live chat.",
+      "input_tokens": 59,
+      "output_tokens": 37,
+      "latency_ms": 18.325582997931633,
+      "cost_usd": 0.0007319999999999999
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "update delivery address",
+      "expected_intent": "change_address",
+      "route": "llm_call",
+      "response": "Edit shipping address from /account/addresses.",
+      "input_tokens": 54,
+      "output_tokens": 22,
+      "latency_ms": 13.611750000563916,
+      "cost_usd": 0.000492
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "human agent please",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 52,
+      "output_tokens": 30,
+      "latency_ms": 13.72458299738355,
+      "cost_usd": 0.000606
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "remove my profile",
+      "expected_intent": "account_delete",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 49,
+      "output_tokens": 25,
+      "latency_ms": 13.461458998790476,
+      "cost_usd": 0.000522
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "order shipping status",
+      "expected_intent": "order_tracking",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 45,
+      "output_tokens": 21,
+      "latency_ms": 8.63516699973843,
+      "cost_usd": 0.00045
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "delete my account",
+      "expected_intent": "account_delete",
+      "route": "llm_call",
+      "response": "Submit account-deletion request from /account/settings/delete.",
+      "input_tokens": 48,
+      "output_tokens": 35,
+      "latency_ms": 13.921207999374019,
+      "cost_usd": 0.000669
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "speak to a representative",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 44,
+      "output_tokens": 24,
+      "latency_ms": 7.125416999770096,
+      "cost_usd": 0.000492
+    },
+    {
+      "system_name": "mock_llm",
+      "query": "human agent please",
+      "expected_intent": "contact_support",
+      "route": "llm_call",
+      "response": "Can you provide more details about your question?",
+      "input_tokens": 42,
+      "output_tokens": 37,
+      "latency_ms": 17.826584000431467,
+      "cost_usd": 0.000681
+    }
+  ]
+}
